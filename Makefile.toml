@@ -1,0 +1,292 @@
+[env]
+CROSS_CC = "x86_64-linux-gnu-gcc"
+CROSS_CXX = "x86_64-linux-gnu-g++"
+CROSS_CFLAGS = ""
+TARGET_DIR = "${CARGO_MAKE_CRATE_TARGET_DIRECTORY}"
+FEATURE = "x86_64,llmp_bind_public"
+LIBAFL_DEBUG_OUTPUT = "1"
+#CUSTOM_QEMU_DIR= "~/qemu-libafl-bridge"
+
+[env.x86_64]
+CROSS_CC = "x86_64-linux-gnu-gcc"
+CROSS_CXX = "x86_64-linux-gnu-g++"
+CROSS_CFLAGS = ""
+TARGET_DIR = "${CARGO_MAKE_CRATE_TARGET_DIRECTORY}"
+BDCLIENT_ARCH = "x86_64"
+FEATURE = "x86_64,llmp_bind_public"
+
+[tasks.unsupported]
+script_runner="@shell"
+script='''
+echo "Qemu fuzzer not supported on windows/mac"
+'''
+
+[tasks.target_dir]
+condition = { files_not_exist = [ "${CARGO_MAKE_CRATE_TARGET_DIRECTORY}" ] }
+script_runner="@shell"
+script='''
+mkdir ${CARGO_MAKE_CRATE_TARGET_DIRECTORY}
+'''
+
+[tasks.deps_dir]
+dependencies = ["target_dir"]
+condition = { files_not_exist = [ "${CARGO_MAKE_CRATE_TARGET_DIRECTORY}/deps/" ] }
+script_runner="@shell"
+script='''
+mkdir ${CARGO_MAKE_CRATE_TARGET_DIRECTORY}/deps/
+'''
+
+[tasks.arch_target_dir]
+dependencies = ["target_dir"]
+condition = { files_not_exist = [ "${TARGET_DIR}" ] }
+script_runner="@shell"
+script='''
+mkdir ${TARGET_DIR}
+'''
+
+[tasks.bdclient]
+linux_alias = "bdclient_unix"
+mac_alias = "unsupported"
+windows_alias = "unsupported"
+
+[tasks.bdclient_clone]
+dependencies = ["deps_dir"]
+condition = { files_not_exist = [ "${TARGET_DIR}/bdclient" ] }
+script_runner="/bin/bash"
+script='''
+    #!/bin/bash
+    set -euo pipefail
+
+    TASK_ARGS_RAW="${@:-}"
+    if [[ -z "$TASK_ARGS_RAW" ]]; then
+        TASK_ARGS_RAW="${CARGO_MAKE_TASK_ARGS:-}"
+    fi
+
+    TASK_ARGS_RAW="${TASK_ARGS_RAW#"${TASK_ARGS_RAW%%[![:space:]]*}"}"
+    if [[ "$TASK_ARGS_RAW" == --[[:space:]]* ]]; then
+        TASK_ARGS_RAW="${TASK_ARGS_RAW#--}"
+        TASK_ARGS_RAW="${TASK_ARGS_RAW#"${TASK_ARGS_RAW%%[![:space:]]*}"}"
+    fi
+
+    if [[ "$TASK_ARGS_RAW" != --engine* ]]; then
+        echo "Error: pass --engine <ENGINE_URL_OR_PATH> as first argument."
+        exit 1
+    fi
+
+    ENGINE_SOURCE="${TASK_ARGS_RAW#--engine}"
+    ENGINE_SOURCE="${ENGINE_SOURCE#"${ENGINE_SOURCE%%[![:space:]]*}"}"
+
+    if [[ "$ENGINE_SOURCE" == \"*\" && "$ENGINE_SOURCE" == *\" ]]; then
+        ENGINE_SOURCE="${ENGINE_SOURCE:1:-1}"
+    fi
+
+    if [[ "$ENGINE_SOURCE" == \'*\' && "$ENGINE_SOURCE" == *\' ]]; then
+        ENGINE_SOURCE="${ENGINE_SOURCE:1:-1}"
+    fi
+
+    if [[ -z "$ENGINE_SOURCE" ]]; then
+        echo "No value for the --engine parameter"
+        exit 1
+    fi
+
+    TEMP_DIR=$(mktemp -d)
+
+    # If ENGINE_SOURCE is an HTTP(S) URL, download and unzip it.
+    # Otherwise, treat it as a local path to a zip file or extracted directory.
+    if [[ "$ENGINE_SOURCE" =~ ^https?:// ]]; then
+        echo "Downloading BitDefender engine from $ENGINE_SOURCE..."
+        curl -L "$ENGINE_SOURCE" -o "$TEMP_DIR/engine.zip"
+        echo "Engine downloaded into $TEMP_DIR"
+        unzip "$TEMP_DIR/engine.zip" -d "$TEMP_DIR"
+    else
+        if [[ ! -e "$ENGINE_SOURCE" ]]; then
+            echo "Engine path not found: $ENGINE_SOURCE"
+            rm -rf "$TEMP_DIR"
+            exit 1
+        fi
+
+        if [[ -d "$ENGINE_SOURCE" ]]; then
+            echo "Using local engine directory: $ENGINE_SOURCE"
+            cp -R "$ENGINE_SOURCE"/. "$TEMP_DIR"
+        else
+            echo "Using local engine archive: $ENGINE_SOURCE"
+            unzip "$ENGINE_SOURCE" -d "$TEMP_DIR"
+        fi
+    fi
+
+    if [[ ! -d "$TEMP_DIR/Plugins" ]]; then
+        echo "Engine package is missing Plugins directory"
+        rm -rf "$TEMP_DIR"
+        exit 1
+    fi
+
+    if [[ ! -f "$TEMP_DIR/bdcore.dll" ]]; then
+        echo "Engine package is missing bdcore.dll"
+        rm -rf "$TEMP_DIR"
+        exit 1
+    fi
+
+    git clone --recurse-submodules --branch bd \
+        https://github.com/cube0x8/BDClient \
+        ${TARGET_DIR}/bdclient
+
+    # Create directories for the engine and stage sync
+    mkdir -p "${TARGET_DIR}/bdclient/dummy"
+    mkdir -p "${TARGET_DIR}/bdclient/dummy/sync"
+    mkdir -p "${TARGET_DIR}/bdclient/engine/x64"
+
+    mv "$TEMP_DIR/Plugins" "${TARGET_DIR}/bdclient/dummy"
+    mv "$TEMP_DIR/bdcore.dll" "${TARGET_DIR}/bdclient/engine/x64"
+
+    # Crea dummy file to scan
+    echo "AA" > "${TARGET_DIR}/bdclient/dummy/input_file"
+
+    # Remove temp dir
+    rm -rf "$TEMP_DIR"
+'''
+
+[tasks.bdclient_unix]
+dependencies = [ "arch_target_dir", "bdclient_clone" ]
+condition = { files_not_exist = [ "${TARGET_DIR}/bdclient/bdclient_x64" ] }
+script_runner="@shell"
+script='''
+
+cd ${TARGET_DIR}/bdclient
+
+SHARED_MEM=1 FUZZ=1 LIBAFL_FUZZING=1 make -j32 bdclient_x64
+'''
+
+[tasks.build]
+linux_alias = "build_unix"
+mac_alias = "build_unix"
+windows_alias = "unsupported"
+
+[tasks.build_unix]
+dependencies = ["bdclient"]
+command = "cargo"
+args = [
+    "build",
+    "--release",
+    "--target-dir", "${TARGET_DIR}",
+]
+
+[tasks.build_coverage]
+linux_alias = "build_coverage_unix"
+mac_alias = "build_coverage_unix"
+windows_alias = "unsupported"
+
+[tasks.build_coverage_unix]
+dependencies = ["bdclient"]
+command = "cargo"
+args = [
+    "build",
+    "--release",
+    "--features", "simplemgr",
+    "--target-dir", "${TARGET_DIR}",
+]
+
+[tasks.dev]
+dependencies = ["bdclient"]
+command = "cargo"
+args = [
+    "build",
+    "--profile", "dev",
+    "--target-dir", "${TARGET_DIR}",
+]
+
+[tasks.run]
+linux_alias = "run_unix"
+mac_alias = "unsupported"
+windows_alias = "unsupported"
+
+[tasks.run_unix]
+command = "${TARGET_DIR}/release/qemu_bdclient"
+args = [
+    "${@}"
+]
+dependencies = [ "build" ]
+
+[tasks.clean]
+linux_alias = "clean_unix"
+mac_alias = "clean_unix"
+windows_alias = "unsupported"
+
+[tasks.clean_unix]
+# Disable default `clean` definition
+clear = true
+script_runner="@shell"
+script='''
+    rm -rf ${CARGO_MAKE_CRATE_TARGET_DIRECTORY}
+    cargo clean
+'''
+
+[tasks.docker]
+linux_alias = "docker_fuzz_unix"
+mac_alias = "docker_fuzz_unix"
+windows_alias = "unsupported"
+
+[tasks.docker_fuzz]
+linux_alias = "docker_fuzz_unix"
+mac_alias = "docker_fuzz_unix"
+windows_alias = "unsupported"
+
+[tasks.docker_fuzz_unix]
+script_runner="/bin/bash"
+script='''
+    #!/bin/bash
+    set -euo pipefail
+
+    if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
+        echo "SSH_AUTH_SOCK is not set. Start ssh-agent and add your key first."
+        exit 1
+    fi
+
+    ENGINE_VERSION_VALUE="${ENGINE_VERSION:-${VERSION:-}}"
+    if [[ -z "${ENGINE_VERSION_VALUE}" ]]; then
+        echo "Set VERSION (or ENGINE_VERSION) with the engine directory name."
+        echo "Example: VERSION=v2.2 TAG=latest cargo make docker"
+        exit 1
+    fi
+
+    TAG_VALUE="${TAG:-latest}"
+
+    DOCKER_BUILDKIT=1 docker build \
+        --ssh "default=${SSH_AUTH_SOCK}" \
+        --build-arg "ENGINE_VERSION=${ENGINE_VERSION_VALUE}" \
+        -f Dockerfile.fuzz \
+        -t "bdcore_fuzzer:${TAG_VALUE}" \
+        .
+'''
+
+[tasks.docker_drcov]
+linux_alias = "docker_drcov_unix"
+mac_alias = "docker_drcov_unix"
+windows_alias = "unsupported"
+
+[tasks.docker_drcov_unix]
+script_runner="/bin/bash"
+script='''
+    #!/bin/bash
+    set -euo pipefail
+
+    if [[ -z "${SSH_AUTH_SOCK:-}" ]]; then
+        echo "SSH_AUTH_SOCK is not set. Start ssh-agent and add your key first."
+        exit 1
+    fi
+
+    ENGINE_VERSION_VALUE="${ENGINE_VERSION:-${VERSION:-}}"
+    if [[ -z "${ENGINE_VERSION_VALUE}" ]]; then
+        echo "Set VERSION (or ENGINE_VERSION) with the engine directory name."
+        echo "Example: VERSION=v2.2 TAG=latest cargo make docker_drcov"
+        exit 1
+    fi
+
+    TAG_VALUE="${TAG:-latest}"
+
+    DOCKER_BUILDKIT=1 docker build \
+        --ssh "default=${SSH_AUTH_SOCK}" \
+        --build-arg "ENGINE_VERSION=${ENGINE_VERSION_VALUE}" \
+        -f Dockerfile.drcov \
+        -t "bdcore_drcov:${TAG_VALUE}" \
+        .
+'''

@@ -1,0 +1,9 @@
+target/
+Cargo.lock
+.vscode
+corpus/
+crashes/
+queue/
+sync/
+.codex
+bdcore_engine/

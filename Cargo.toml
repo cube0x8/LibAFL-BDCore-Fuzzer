@@ -1,0 +1,54 @@
+[package]
+name = "qemu_bdclient"
+edition = "2021"
+version = "0.10.1"
+
+[features]
+default = ["std", "x86_64"]
+std = []
+be = ["libafl_qemu/be"]
+arm = ["libafl_qemu/arm"]
+x86_64 = ["libafl_qemu/x86_64"]
+i386 = ["libafl_qemu/i386"]
+aarch64 = ["libafl_qemu/aarch64"]
+mips = ["libafl_qemu/mips"]
+ppc = ["libafl_qemu/ppc", "be"]
+errors_backtrace = ["libafl_bolts/errors_backtrace"]
+llmp_bind_public = ["libafl_bolts/llmp_bind_public"]
+simplemgr = []
+
+[build]
+jobs = 32
+
+[profile.release]
+lto = true
+codegen-units = 1
+opt-level = 3
+debug = false
+
+[profile.dev]
+lto = true
+codegen-units = 1
+opt-level = 0
+debug = true
+
+[build-dependencies]
+vergen = { version = "8.2.1", features = ["build", "cargo", "git", "gitcl", "rustc", "si"] }
+
+[dependencies]
+clap = { version = "4.5.58", features = ["derive", "string"]}
+libafl = { path = "../LibAFL/crates/libafl", features = ["prometheus_monitor", "multi_machine"] }
+libafl_bolts = { path = "../LibAFL/crates/libafl_bolts/" }
+libafl_qemu = { path = "../LibAFL/crates/libafl_qemu/", features = ["usermode", "x86_64"] }
+libafl_pe_mutator = { path = "../PEMutator/crates/pe-mutator-libafl", package = "pe-mutator-libafl" }
+libafl_targets = { path = "../LibAFL/crates/libafl_targets" }
+rangemap = { version = "1.3" }
+lazy_static = "1.4"
+env_logger = "0.10.1"
+rand = "0.8.5"
+typed-builder = { version = "0.19" }
+log = { version = "0.4.20" }
+nix = { version = "0.29", features = ["fs"] }
+readonly = { version = "0.2.10" }
+flate2 = { version = "1.0.35" }
+serde = { version = "1.0", features = ["derive"] }
