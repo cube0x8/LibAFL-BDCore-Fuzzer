@@ -34,8 +34,8 @@ impl CevaTarget for TranslateNodeLinkTarget {
             - u64::from_le_bytes(guest_bytes_start_addr.try_into().unwrap());
 
         // the mutator should have generated an input of the size declared in the user manifest, but just in case...
-        println!("Guest bytes buffer at {guest_bytes_ptr:#x} with size {guest_bytes_len}");
-        println!("Input size: {}", input.len());
+        // println!("Guest bytes buffer at {guest_bytes_ptr:#x} with size {guest_bytes_len}");
+        // println!("Input size: {}", input.len());
         assert!(guest_bytes_len == input.len() as u64);
 
         qemu.write_mem(guest_bytes_ptr, input).unwrap();
