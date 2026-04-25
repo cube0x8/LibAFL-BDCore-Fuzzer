@@ -5,15 +5,13 @@ use std::{
     env,
     fs::{File, OpenOptions},
     io::{self, Write},
-    ops::Range,
-    path::PathBuf,
     sync::Arc,
 };
 
 use clap::Parser;
 #[cfg(not(feature = "simplemgr"))]
 use libafl::{
-    events::{ClientDescription, EventConfig, Launcher},
+    events::{EventConfig, Launcher},
     monitors::{Monitor, MultiMonitor, PrometheusMonitor},
     Error,
 };
@@ -33,7 +31,12 @@ use libafl_bolts::shmem::{ShMemProvider, StdShMemProvider};
 #[cfg(unix)]
 use std::os::unix::io::{AsRawFd, FromRawFd};
 
-use crate::{client::Client, harness::Harness, options::FuzzerOptions, scan_profile::ScanProfile};
+use crate::{
+    client::Client,
+    harness::{AnyHarness, CevaEmuHarness, CevaTargetKind, FuzzHarness, Harness},
+    options::FuzzerOptions,
+    scan_profile::ScanProfile,
+};
 
 pub struct Fuzzer {
     options: FuzzerOptions,
@@ -143,10 +146,10 @@ impl Fuzzer {
             Some("/dev/null")
         };
 
-        let mut args = self.args()?;
+        let args = self.args()?;
         log::debug!("ARGS: {:#?}", args);
 
-        let mut env = self.env();
+        let env = self.env();
         log::debug!("ENV: {:#?}", env);
 
         let qemu = Qemu::init(&args)?;
@@ -155,18 +158,30 @@ impl Fuzzer {
             .scan_profile_every()
             .map(|report_every| Arc::new(ScanProfile::new(report_every)));
 
-        let mut harness = Harness::new(&qemu)?;
-        harness.init(
-            self.options.bitdefender_modules.clone(),
-            self.options.exit_points.clone(),
-        )?;
+        let harness = if self.options.translate_node_link {
+            let entry_point = self.options.entry_point.clone().unwrap();
+            let mut harness = CevaEmuHarness::new(
+                &qemu,
+                entry_point,
+                CevaTargetKind::TranslateNodeLink.build(),
+            )?;
+            harness.init(self.options.bitdefender_modules.clone())?;
+            AnyHarness::CevaEmu(harness)
+        } else {
+            let mut harness = Harness::new(&qemu)?;
+            harness.init(
+                self.options.bitdefender_modules.clone(),
+                self.options.exit_points.clone(),
+            )?;
+            AnyHarness::Standard(harness)
+        };
 
         qemu.flush_jit();
 
         let mut client = Client::builder()
             .options(&self.options)
             .qemu(&qemu)
-            .harness(&harness)
+            .harness(&harness as &dyn FuzzHarness)
             .scan_profile(scan_profile)
             .build();
 

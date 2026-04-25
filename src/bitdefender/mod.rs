@@ -1,3 +1,4 @@
+use libafl::Error;
 use libafl_qemu::{ArchExtras, GuestAddr, GuestReg, Qemu, Regs};
 use rangemap::RangeMap;
 use std::{fmt, ops::Range, str::FromStr};
@@ -42,15 +43,14 @@ impl BDEngine {
         BDEngine {
             modules: Vec::new(),
             modules_to_instrument: Some(RangeMap::new()),
-            virtual_protect_ptr: virtual_protect_ptr,
+            virtual_protect_ptr,
             nt_virtual_protect_ptr: nt_virtual_protect,
-            initialize_core_ptr: initialize_core_ptr,
-            module_instrumentation_callback_ptr: module_instrumentation_callback_ptr,
+            initialize_core_ptr,
+            module_instrumentation_callback_ptr,
         }
     }
 
     fn add_module(&mut self, name: String, start_addr: u64, size: u64) {
-        //log::debug!("Adding module: {} - {:X} - {:X}", name, start_addr, start_addr + size);
         self.modules.push(BDModule {
             name,
             start_addr,
@@ -68,14 +68,11 @@ impl BDEngine {
     }
 
     pub fn core_initialization(&mut self, qemu: &Qemu) {
-        // Set a bp on core initialization function and its return address
-        // so we know when initialization start and when it ends. When it ends
-        // we know we saved all the modules
         qemu.set_breakpoint(self.initialize_core_ptr);
-        //emu.set_breakpoint(main_ptr);
 
-        unsafe { qemu.run() };
-        //println!("Core initializing started");
+        unsafe {
+            let _ = qemu.run();
+        };
         log::debug!("Core initializing started");
         let initialize_core_ret_addr: GuestAddr =
             qemu.read_return_address().unwrap().try_into().unwrap();
@@ -84,18 +81,15 @@ impl BDEngine {
             initialize_core_ret_addr
         );
         qemu.remove_breakpoint(self.initialize_core_ptr);
-        //emu.remove_breakpoint(main_ptr);
         qemu.set_breakpoint(initialize_core_ret_addr);
-
-        // This loops over VirtualProtect and ModuleInstrumentationCallback2, and we store all modules
-        // names/base addresses/sizes
 
         loop {
             qemu.set_breakpoint(self.virtual_protect_ptr);
             qemu.set_breakpoint(self.nt_virtual_protect_ptr);
-            unsafe { qemu.run() };
+            unsafe {
+                let _ = qemu.run();
+            };
 
-            // Check if the core initialization hash finished
             let pc: GuestAddr = qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
             if pc == initialize_core_ret_addr {
                 log::debug!("Core initializing finished");
@@ -105,25 +99,23 @@ impl BDEngine {
             qemu.remove_breakpoint(self.virtual_protect_ptr);
             qemu.remove_breakpoint(self.nt_virtual_protect_ptr);
             qemu.set_breakpoint(self.module_instrumentation_callback_ptr);
-            unsafe { qemu.run() };
+            unsafe {
+                let _ = qemu.run();
+            };
 
-            // I'm not very sure if there are VirtualProtect which are not on modules
-            // during initialization, but just in case...
             let pc: GuestAddr = qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
             if pc == initialize_core_ret_addr {
                 log::debug!("Core initializing finished");
                 break;
             }
 
-            // Here we are on ModuleInstrumentationCallback2 prologue, so we store
-            // all modules information
             let module_name_ptr: GuestAddr = qemu.read_reg(Regs::Rdi).unwrap().try_into().unwrap();
             let module_name_len: GuestReg = qemu.read_reg(Regs::Rsi).unwrap();
             let module_base_addr: GuestReg = qemu.read_reg(Regs::Rdx).unwrap();
             let module_size: GuestReg = qemu.read_reg(Regs::Rcx).unwrap();
 
             let mut module_name_buf: Vec<u8> = vec![0; module_name_len as usize];
-            unsafe { qemu.read_mem(module_name_ptr, &mut module_name_buf) };
+            let _ = qemu.read_mem(module_name_ptr, &mut module_name_buf);
 
             let module_name_str = match std::str::from_utf8(&module_name_buf) {
                 Ok(s) => s,
@@ -147,7 +139,6 @@ impl BDEngine {
     fn check_modules(&self, selected_modules_to_instrument: Vec<String>) -> Result<(), String> {
         for module_name in &selected_modules_to_instrument {
             log::debug!("Checking module: {}", module_name);
-            // Check if any BDModule has the same name
             if !self
                 .modules
                 .iter()
@@ -166,7 +157,6 @@ impl BDEngine {
 
     pub fn instrument_modules(&mut self, selected_modules_to_instrument: Option<Vec<String>>) {
         match selected_modules_to_instrument {
-            // check if there are wrong typed modules
             Some(modules) => {
                 match self.check_modules(modules.clone()) {
                     Ok(()) => {
@@ -212,5 +202,85 @@ impl BDEngine {
         } else {
             None
         }
+    }
+
+    pub fn resolve_entry_point(&self, spec: &str) -> Result<GuestAddr, Error> {
+        self.resolve_module_address(spec, "entry point")
+    }
+
+    pub fn resolve_exit_points(&self, specs: &[String]) -> Result<Vec<GuestAddr>, Error> {
+        if specs.is_empty() {
+            return Err(Error::unknown(
+                "At least one --exit-point value is required when the option is provided",
+            ));
+        }
+
+        let mut resolved = Vec::with_capacity(specs.len());
+        for spec in specs {
+            resolved.push(self.resolve_module_address(spec, "exit point")?);
+        }
+        Ok(resolved)
+    }
+
+    fn resolve_module_address(&self, spec: &str, kind: &str) -> Result<GuestAddr, Error> {
+        let (module_name, offset_str) = spec.split_once(":+").ok_or_else(|| {
+            Error::unknown(format!(
+                "Invalid {kind} format '{spec}', expected module:+offset"
+            ))
+        })?;
+
+        let module_name = module_name.trim();
+        let offset_str = offset_str.trim();
+
+        if module_name.is_empty() || offset_str.is_empty() {
+            return Err(Error::unknown(format!(
+                "Invalid {kind} format '{spec}', expected module:+offset"
+            )));
+        }
+
+        let offset = if let Some(hex) = offset_str
+            .strip_prefix("0x")
+            .or_else(|| offset_str.strip_prefix("0X"))
+        {
+            GuestAddr::from_str_radix(hex, 16).map_err(|err| {
+                Error::unknown(format!(
+                    "Failed to parse hexadecimal offset '{offset_str}' for {kind} '{spec}': {err}"
+                ))
+            })?
+        } else {
+            offset_str.parse::<GuestAddr>().map_err(|err| {
+                Error::unknown(format!(
+                    "Failed to parse decimal offset '{offset_str}' for {kind} '{spec}': {err}"
+                ))
+            })?
+        };
+
+        let module = self
+            .modules
+            .iter()
+            .find(|module| module.name == module_name)
+            .ok_or_else(|| {
+                Error::unknown(format!(
+                    "{kind} module '{module_name}' not found. Available modules: {:?}",
+                    self.modules
+                ))
+            })?;
+
+        let offset = offset as u64;
+        let addr = module.start_addr.checked_add(offset).ok_or_else(|| {
+            Error::unknown(format!(
+                "{kind} '{spec}' overflows module base {:#x} with offset {offset:#x}",
+                module.start_addr
+            ))
+        })?;
+
+        let addr = GuestAddr::try_from(addr).map_err(|_| {
+            Error::unknown(format!(
+                "Resolved {kind} '{spec}' address {addr:#x} does not fit GuestAddr"
+            ))
+        })?;
+
+        println!("{} {spec} -> {addr:#x}", kind.to_ascii_uppercase());
+        Ok(addr)
     }
 }

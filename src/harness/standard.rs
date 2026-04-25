@@ -1,20 +1,16 @@
-use crate::bitdefender::{BDEngine, DUMMY_PATH};
+use crate::{
+    bitdefender::{BDEngine, DUMMY_PATH},
+    scan_profile::ScanProfile,
+};
 
 use libafl::{
     executors::ExitKind,
-    inputs::{BytesInput, HasTargetBytes, Input},
+    inputs::{BytesInput, HasTargetBytes},
     Error,
 };
 use libafl_bolts::AsSlice;
 use libafl_qemu::{
-    elf::EasyElf,
-    //helper::QemuHelperTuple,
-    ArchExtras,
-    GuestAddr,
-    GuestReg,
-    MmapPerms,
-    Qemu,
-    Regs,
+    elf::EasyElf, ArchExtras, GuestAddr, GuestReg, MmapPerms, Qemu, Regs,
 };
 use std::{
     ops::Range,
@@ -22,7 +18,10 @@ use std::{
     time::{Duration, Instant},
 };
 
-use crate::scan_profile::ScanProfile;
+use super::{FILE_PATH_SIZE, G_MMAP_FILE_SIZE, MAX_INPUT_SIZE, MAX_TARGET_INPUT_SIZE};
+
+const SCAN_FILE_CORE_SET_CALL_OFFSET: GuestAddr = 0x7c;
+const SCAN_FILE_AFTER_CORE_SET_OFFSET: GuestAddr = 0x7e;
 
 pub struct Harness<'a> {
     qemu: &'a Qemu,
@@ -40,15 +39,8 @@ pub struct Harness<'a> {
     pub bd_engine: BDEngine,
 }
 
-pub const MAX_INPUT_SIZE: usize = 1_048_576; // 1MB
-pub const MAX_TARGET_INPUT_SIZE: usize = 307_200;
-pub const FILE_PATH_SIZE: usize = 1024;
-pub const G_MMAP_FILE_SIZE: usize = 280;
-const SCAN_FILE_CORE_SET_CALL_OFFSET: GuestAddr = 0x7c;
-const SCAN_FILE_AFTER_CORE_SET_OFFSET: GuestAddr = 0x7e;
-
 impl<'a> Harness<'a> {
-    pub fn new(qemu: &Qemu) -> Result<Harness<'_>, Error> {
+    pub fn new(qemu: &'a Qemu) -> Result<Harness<'a>, Error> {
         let mut elf_buffer = Vec::new();
         let elf = EasyElf::from_file(qemu.binary_path(), &mut elf_buffer).unwrap();
 
@@ -87,9 +79,7 @@ impl<'a> Harness<'a> {
             .expect("Symbol InitializeCore not found");
         println!("CoreInitializeResult @ {initialize_core_ptr:#x}");
 
-        let file_path = qemu
-            .map_private(0, FILE_PATH_SIZE, MmapPerms::ReadWrite)
-            .unwrap();
+        let file_path = qemu.map_private(0, FILE_PATH_SIZE, MmapPerms::ReadWrite)?;
         println!("File path @ {file_path:#x}");
 
         let bd_engine = BDEngine::new(
@@ -99,9 +89,7 @@ impl<'a> Harness<'a> {
             module_instrumentation_callback_ptr,
         );
 
-        unsafe {
-            qemu.write_mem(file_path, DUMMY_PATH.as_bytes());
-        }
+        let _ = qemu.write_mem(file_path, DUMMY_PATH.as_bytes());
 
         Ok(Harness {
             qemu,
@@ -136,81 +124,6 @@ impl<'a> Harness<'a> {
         self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap()
     }
 
-    fn resolve_exit_points(&self, specs: &[String]) -> Result<Vec<GuestAddr>, Error> {
-        if specs.is_empty() {
-            return Err(Error::unknown(
-                "At least one --exit-point value is required when the option is provided",
-            ));
-        }
-
-        let mut resolved = Vec::with_capacity(specs.len());
-
-        for spec in specs {
-            let (module_name, offset_str) = spec.split_once(":+").ok_or_else(|| {
-                Error::unknown(format!(
-                    "Invalid exit point format '{spec}', expected module:+offset"
-                ))
-            })?;
-
-            let module_name = module_name.trim();
-            let offset_str = offset_str.trim();
-
-            if module_name.is_empty() || offset_str.is_empty() {
-                return Err(Error::unknown(format!(
-                    "Invalid exit point format '{spec}', expected module:+offset"
-                )));
-            }
-
-            let offset = if let Some(hex) = offset_str
-                .strip_prefix("0x")
-                .or_else(|| offset_str.strip_prefix("0X"))
-            {
-                GuestAddr::from_str_radix(hex, 16).map_err(|err| {
-                    Error::unknown(format!(
-                        "Failed to parse hexadecimal offset '{offset_str}' for exit point '{spec}': {err}"
-                    ))
-                })?
-            } else {
-                offset_str.parse::<GuestAddr>().map_err(|err| {
-                    Error::unknown(format!(
-                        "Failed to parse decimal offset '{offset_str}' for exit point '{spec}': {err}"
-                    ))
-                })?
-            };
-
-            let module = self
-                .bd_engine
-                .modules
-                .iter()
-                .find(|module| module.name == module_name)
-                .ok_or_else(|| {
-                    Error::unknown(format!(
-                        "Exit point module '{module_name}' not found. Available modules: {:?}",
-                        self.bd_engine.modules
-                    ))
-                })?;
-
-            let offset = offset as u64;
-            let addr = module.start_addr.checked_add(offset).ok_or_else(|| {
-                Error::unknown(format!(
-                    "Exit point '{spec}' overflows module base {:#x} with offset {offset:#x}",
-                    module.start_addr
-                ))
-            })?;
-
-            let addr = GuestAddr::try_from(addr).map_err(|_| {
-                Error::unknown(format!(
-                    "Resolved exit point '{spec}' address {addr:#x} does not fit GuestAddr"
-                ))
-            })?;
-
-            println!("Exit point {spec} -> {addr:#x}");
-            resolved.push(addr);
-        }
-
-        Ok(resolved)
-    }
-
     fn run_with_breakdown(
         &self,
         scan_profile: &ScanProfile,
@@ -222,7 +135,9 @@ impl<'a> Harness<'a> {
 
         let guest_exec_started_at = Instant::now();
         let setup_started_at = Instant::now();
-        unsafe { self.qemu.run() };
+        unsafe {
+            let _ = self.qemu.run();
+        };
 
         let setup_hit = self.current_pc() == self.scan_file_core_set_call_pc;
         if !setup_hit {
@@ -238,7 +153,9 @@ impl<'a> Harness<'a> {
         self.qemu.remove_breakpoint(self.scan_file_core_set_call_pc);
 
         let core_scan_started_at = Instant::now();
-        unsafe { self.qemu.run() };
+        unsafe {
+            let _ = self.qemu.run();
+        };
 
         let core_scan_hit = self.current_pc() == self.scan_file_after_core_set_pc;
         if !core_scan_hit {
@@ -254,7 +171,9 @@ impl<'a> Harness<'a> {
             .remove_breakpoint(self.scan_file_after_core_set_pc);
 
         let teardown_started_at = Instant::now();
-        unsafe { self.qemu.run() };
+        unsafe {
+            let _ = self.qemu.run();
+        };
 
         if self.exit_points.contains(&self.current_pc()) {
             scan_profile.record_teardown(teardown_started_at.elapsed());
@@ -271,20 +190,16 @@ impl<'a> Harness<'a> {
         modules_to_instrument: Option<Vec<String>>,
         exit_points: Option<Vec<String>>,
     ) -> Result<(), Error> {
-        // Initialize the Bitdefender Engine. This runs untile the ret addr of InitializeCore
         self.bd_engine.core_initialization(self.qemu);
-
-        // Store the ranges of the module to instrument
         self.bd_engine.instrument_modules(modules_to_instrument);
 
-        let duration = Duration::from_secs(5);
-        thread::sleep(duration);
+        thread::sleep(Duration::from_secs(5));
 
-        // Run until ScanFile()
         self.qemu.set_breakpoint(self.scan_file_ptr);
-        unsafe { self.qemu.run() };
+        unsafe {
+            let _ = self.qemu.run();
+        };
 
-        // store the stack pointer, return address, and rdi
         let stack_ptr: GuestAddr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
         let rdi: GuestAddr = self.qemu.read_reg(Regs::Rdi).unwrap().try_into().unwrap();
         let scan_file_ret_addr: GuestAddr =
@@ -294,11 +209,10 @@ impl<'a> Harness<'a> {
         let pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
         println!("Break at {pc:#x}");
 
-        // Remove the bp to ScanFile, set it on its return ptr
         self.qemu.remove_breakpoint(self.scan_file_ptr);
 
         self.exit_points = match exit_points {
-            Some(specs) => self.resolve_exit_points(&specs)?,
+            Some(specs) => self.bd_engine.resolve_exit_points(&specs)?,
             None => vec![scan_file_ret_addr],
         };
 
@@ -306,7 +220,6 @@ impl<'a> Harness<'a> {
             self.qemu.set_breakpoint(*exit_point);
         }
 
-        // Store the new emu state for the restore
         self.pc = pc;
         self.stack_ptr = stack_ptr;
         self.ret_addr = scan_file_ret_addr;
@@ -316,33 +229,30 @@ impl<'a> Harness<'a> {
     }
 
     fn reset(&self, buf: &[u8], len: GuestReg) -> Result<(), Error> {
-        unsafe {
-            self.qemu.write_mem(self.input_addr, buf);
+        let _ = self.qemu.write_mem(self.input_addr, buf);
 
-            self.qemu
-                .write_reg(Regs::Rdi, GuestReg::try_from(self.rdi).unwrap())
-                .unwrap();
-            self.qemu
-                .write_reg(Regs::Rsi, GuestReg::try_from(self.input_addr).unwrap())
-                .unwrap();
-            self.qemu.write_reg(Regs::Rdx, len).unwrap();
-            self.qemu
-                .write_reg(Regs::Rcx, GuestReg::try_from(self.file_path).unwrap())
-                .unwrap();
+        self.qemu
+            .write_reg(Regs::Rdi, GuestReg::try_from(self.rdi).unwrap())
+            .unwrap();
+        self.qemu
+            .write_reg(Regs::Rsi, GuestReg::try_from(self.input_addr).unwrap())
+            .unwrap();
+        self.qemu.write_reg(Regs::Rdx, len).unwrap();
+        self.qemu
+            .write_reg(Regs::Rcx, GuestReg::try_from(self.file_path).unwrap())
+            .unwrap();
 
-            self.qemu
-                .write_reg(Regs::Pc, GuestReg::try_from(self.pc).unwrap())
-                .unwrap();
-            self.qemu
-                .write_reg(Regs::Sp, GuestReg::try_from(self.stack_ptr).unwrap())
-                .unwrap();
-        }
+        self.qemu
+            .write_reg(Regs::Pc, GuestReg::try_from(self.pc).unwrap())
+            .unwrap();
+        self.qemu
+            .write_reg(Regs::Sp, GuestReg::try_from(self.stack_ptr).unwrap())
+            .unwrap();
+
         Ok(())
     }
 
     pub fn run(&self, input: &BytesInput, scan_profile: Option<&ScanProfile>) -> ExitKind {
-        //println!("HARNESS STARTS");
-
         let target = input.target_bytes();
         let mut buf = target.as_slice();
 
@@ -363,9 +273,9 @@ impl<'a> Harness<'a> {
         if let Some(scan_profile) = scan_profile {
             return self.run_with_breakdown(scan_profile, buf.len(), truncated);
         }
-        unsafe { self.qemu.run() };
-
-        //println!("HARNESS ENDS");
+        unsafe {
+            let _ = self.qemu.run();
+        };
 
         ExitKind::Ok
     }

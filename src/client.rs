@@ -21,7 +21,7 @@ use libafl_qemu::{
 };
 
 use crate::{
-    harness::Harness,
+    harness::FuzzHarness,
     instance::Instance,
     options::FuzzerOptions,
     scan_profile::{ScanProfile, ScanRestoreEndModule, ScanRestoreStartModule},
@@ -36,7 +36,7 @@ pub type ClientState =
 pub struct Client<'a> {
     options: &'a FuzzerOptions,
     qemu: &'a Qemu,
-    harness: &'a Harness<'a>,
+    harness: &'a dyn FuzzHarness,
     scan_profile: Option<Arc<ScanProfile>>,
 }
 
@@ -66,7 +66,7 @@ impl<'a> Client<'a> {
         let instance = Instance::builder()
             .options(self.options)
             .qemu(&self.qemu)
-            .harness(&self.harness)
+            .harness(self.harness)
             .scan_profile(self.scan_profile.clone())
             .mgr(mgr)
             .client_description(client_description);
@@ -79,7 +79,7 @@ impl<'a> Client<'a> {
                         snapshot_module,
                         ScanRestoreEndModule::new(scan_profile),
                         CmpLogModule::new(StdAddressFilter::allow_list(
-                            self.harness.bd_engine.coverage_filter().unwrap()
+                            self.harness.bd_engine().coverage_filter().unwrap()
                         ),),
                     ),
                     state,
@@ -89,7 +89,7 @@ impl<'a> Client<'a> {
                     tuple_list!(
                         snapshot_module,
                         CmpLogModule::new(StdAddressFilter::allow_list(
-                            self.harness.bd_engine.coverage_filter().unwrap()
+                            self.harness.bd_engine().coverage_filter().unwrap()
                         ),),
                     ),
                     state,
@@ -103,11 +103,11 @@ impl<'a> Client<'a> {
             let drcov_output = self.options.drcov.as_ref().unwrap();
 
             let drcov = if let Some(coverage_modules_map) =
-                self.harness.bd_engine.modules_to_instrument.clone()
+                self.harness.bd_engine().modules_to_instrument.clone()
             {
                 DrCovModule::builder()
                     .filter(StdAddressFilter::allow_list(
-                        self.harness.bd_engine.coverage_filter().unwrap(),
+                        self.harness.bd_engine().coverage_filter().unwrap(),
                     ))
                     .module_mapping(coverage_modules_map.clone())
                     .path(drcov_output.clone())
@@ -116,7 +116,7 @@ impl<'a> Client<'a> {
             } else {
                 DrCovModule::builder()
                     .filter(StdAddressFilter::allow_list(
-                        self.harness.bd_engine.coverage_filter().unwrap(),
+                        self.harness.bd_engine().coverage_filter().unwrap(),
                     ))
                     .path(drcov_output.clone())
                     .full_trace(false)

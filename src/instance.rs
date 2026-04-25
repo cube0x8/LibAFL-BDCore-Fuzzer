@@ -17,7 +17,7 @@ use libafl::{
     fuzzer::{Evaluator, Fuzzer, StdFuzzer},
     inputs::{BytesInput, Input},
     mutators::{
-        havoc_mutations, token_mutations::I2SRandReplace, HavocScheduledMutator, StdMOptMutator,
+        token_mutations::I2SRandReplace, HavocScheduledMutator, StdMOptMutator,
         TuneableScheduledMutator,
     },
     observers::{CanTrack, HitcountsMapObserver, TimeObserver, VariableMapObserver},
@@ -161,8 +161,8 @@ where
 }
 
 use crate::{
-    harness::{Harness, MAX_TARGET_INPUT_SIZE},
-    mutator::BDCoreMutator,
+    harness::{FuzzHarness, MAX_TARGET_INPUT_SIZE},
+    mutator::{havoc_fixed_size_mutations, BDCoreMutator},
     options::FuzzerOptions,
     scan_profile::ScanProfile,
     utils,
@@ -243,7 +243,7 @@ fn pe_mutator_from_options(options: &FuzzerOptions) -> PeMutator {
 pub struct Instance<'a, EM> {
     options: &'a FuzzerOptions,
     qemu: &'a Qemu,
-    harness: &'a Harness<'a>,
+    harness: &'a dyn FuzzHarness,
     scan_profile: Option<Arc<ScanProfile>>,
     mgr: EM,
     client_description: ClientDescription,
@@ -327,7 +327,7 @@ where
         };
 
         let mut edge_cov_address_filter = StdAddressFilter::default();
-        match self.harness.bd_engine.coverage_filter() {
+        match self.harness.bd_engine().coverage_filter() {
             Some(cov_address_range) => {
                 edge_cov_address_filter = StdAddressFilter::allow_list(cov_address_range);
             }
@@ -476,8 +476,21 @@ where
             let power_mutator = if self.options.pe_mutator {
                 BDCoreMutator::Pe(pe_mutator_from_options(self.options))
             } else {
-                let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)?;
-                BDCoreMutator::Mopt(mutator)
+                if self.options.fixed_size_mutations {
+                    BDCoreMutator::MoptFixed(StdMOptMutator::new(
+                        &mut state,
+                        havoc_fixed_size_mutations(),
+                        7,
+                        5,
+                    )?)
+                } else {
+                    BDCoreMutator::Mopt(StdMOptMutator::new(
+                        &mut state,
+                        libafl::mutators::havoc_mutations(),
+                        7,
+                        5,
+                    )?)
+                }
             };
             let power: StdPowerMutationalStage<_, _, BytesInput, _, _, _> =
                 StdPowerMutationalStage::new(power_mutator);
@@ -522,7 +535,21 @@ where
                     }
                 }
             } else {
-                let mutator = StdMOptMutator::new(&mut state, havoc_mutations(), 7, 5)?;
+                let mutator = if self.options.fixed_size_mutations {
+                    BDCoreMutator::MoptFixed(StdMOptMutator::new(
+                        &mut state,
+                        havoc_fixed_size_mutations(),
+                        7,
+                        5,
+                    )?)
+                } else {
+                    BDCoreMutator::Mopt(StdMOptMutator::new(
+                        &mut state,
+                        libafl::mutators::havoc_mutations(),
+                        7,
+                        5,
+                    )?)
+                };
                 match self.options.sync_dir() {
                     Some(sync_dir) => {
                         let sync_stage =

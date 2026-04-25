@@ -1,11 +1,10 @@
-use clap::{builder::Str, error::ErrorKind, CommandFactory, Parser, Subcommand};
+use clap::{builder::Str, error::ErrorKind, CommandFactory, Parser};
 use core::time::Duration;
 use libafl::Error;
 use libafl_bolts::core_affinity::{CoreId, Cores};
 use std::{
     env,
     net::{IpAddr, SocketAddr, TcpListener},
-    ops::Range,
     path::PathBuf,
 };
 
@@ -125,6 +124,12 @@ pub struct FuzzerOptions {
     )]
     pub only_seeds: bool,
 
+    #[arg(
+        long,
+        help = "Restrict havoc mutations to size-preserving operations that keep the input length unchanged"
+    )]
+    pub fixed_size_mutations: bool,
+
     #[arg(long, help = "Cpu cores to use for CmpLog", value_parser = Cores::from_cmdline)]
     pub cmplog_cores: Option<Cores>,
 
@@ -201,6 +206,15 @@ pub struct FuzzerOptions {
         value_delimiter = ','
     )]
     pub exit_points: Option<Vec<String>>,
+
+    #[arg(long, help = "Target the ceva_emu TranslateNodeLink function")]
+    pub translate_node_link: bool,
+
+    #[arg(
+        long,
+        help = "Entry point for ceva_emu targeted mutations in format module:+offset"
+    )]
+    pub entry_point: Option<String>,
 
     #[arg(
         long,
@@ -417,6 +431,33 @@ impl FuzzerOptions {
                     .exit();
                 }
             }
+        }
+
+        if self.translate_node_link && self.entry_point.is_none() {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::MissingRequiredArgument,
+                "Using --translate-node-link requires --entry-point <module:+offset>",
+            )
+            .exit();
+        }
+
+        if !self.translate_node_link && self.entry_point.is_some() {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --entry-point currently requires a ceva_emu target such as --translate-node-link",
+            )
+            .exit();
+        }
+
+        if self.translate_node_link && self.exit_points.is_some() {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Custom --exit-point values are not supported for ceva_emu targeted mutations",
+            )
+            .exit();
         }
     }
 }
