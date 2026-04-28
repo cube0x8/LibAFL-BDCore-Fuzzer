@@ -31,6 +31,7 @@ pub struct CevaEmuHarness<'a> {
     pub rbx: GuestAddr,
     pub ret_addr: GuestAddr,
     pub exit_point: GuestAddr,
+    pub exit_points: Vec<GuestAddr>,
     pub entry_point: GuestAddr,
     pub bd_engine: BDEngine,
     entry_point_spec: String,
@@ -87,6 +88,7 @@ impl<'a> CevaEmuHarness<'a> {
             rbx: 0,
             ret_addr: 0,
             exit_point: 0,
+            exit_points: Vec::new(),
             entry_point: 0,
             bd_engine,
             entry_point_spec,
@@ -105,6 +107,7 @@ impl<'a> CevaEmuHarness<'a> {
     pub fn init(
         &mut self,
         modules_to_instrument: Option<Vec<String>>,
+        exit_points: Option<Vec<String>>,
         max_bp_hit_count: Option<u64>,
     ) -> Result<(), Error> {
         self.bd_engine.core_initialization(self.qemu);
@@ -135,7 +138,19 @@ impl<'a> CevaEmuHarness<'a> {
         self.target = Some(target);
         
         self.qemu.remove_breakpoint(self.entry_point);
-        self.qemu.set_breakpoint(self.exit_point);
+        self.exit_points = match exit_points {
+            Some(specs) => {
+                let mut resolved_exit_points = Vec::with_capacity(specs.len() + 1);
+                resolved_exit_points.push(self.exit_point);
+                resolved_exit_points.extend(self.bd_engine.resolve_exit_points(&specs)?);
+                resolved_exit_points
+            }
+            None => vec![self.exit_point],
+        };
+
+        for exit_point in &self.exit_points {
+            self.qemu.set_breakpoint(*exit_point);
+        }
 
         self.pc = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
         println!("Snapshot at {:#x}", self.pc);
@@ -200,7 +215,7 @@ impl<'a> CevaEmuHarness<'a> {
             scan_profile.record_input_reset(reset_started_at.elapsed());
 
             log::debug!(
-                "CevaEmu pre-run regs: pc={:#x} sp={:#x} rcx={:#x} rdx={:#x} r8={:#x} ret={:#x} exit={:#x}",
+                "CevaEmu pre-run regs: pc={:#x} sp={:#x} rcx={:#x} rdx={:#x} r8={:#x} ret={:#x} primary_exit={:#x} exits={:?}",
                 self.qemu.read_reg(Regs::Pc).unwrap(),
                 self.qemu.read_reg(Regs::Sp).unwrap(),
                 self.qemu.read_reg(Regs::Rcx).unwrap(),
@@ -208,17 +223,26 @@ impl<'a> CevaEmuHarness<'a> {
                 self.qemu.read_reg(Regs::R8).unwrap(),
                 self.ret_addr,
                 self.exit_point,
+                self.exit_points,
             );
             let guest_exec_started_at = Instant::now();
             unsafe {
                 let _ = self.qemu.run();
             };
+            let post_pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+            let post_sp: GuestAddr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
+            log::debug!(
+                "CevaEmu post-run regs: pc={post_pc:#x} sp={post_sp:#x} primary_exit={:#x} matched_any_exit={} exits={:?}",
+                self.exit_point,
+                self.exit_points.contains(&post_pc),
+                self.exit_points,
+            );
             scan_profile.record_guest_exec(guest_exec_started_at.elapsed(), buf.len(), truncated);
             return ExitKind::Ok;
         }
 
         log::debug!(
-            "CevaEmu pre-run regs: pc={:#x} sp={:#x} rcx={:#x} rdx={:#x} r8={:#x} ret={:#x} exit={:#x}",
+            "CevaEmu pre-run regs: pc={:#x} sp={:#x} rcx={:#x} rdx={:#x} r8={:#x} ret={:#x} primary_exit={:#x} exits={:?}",
             self.qemu.read_reg(Regs::Pc).unwrap(),
             self.qemu.read_reg(Regs::Sp).unwrap(),
             self.qemu.read_reg(Regs::Rcx).unwrap(),
@@ -226,10 +250,19 @@ impl<'a> CevaEmuHarness<'a> {
             self.qemu.read_reg(Regs::R8).unwrap(),
             self.ret_addr,
             self.exit_point,
+            self.exit_points,
         );
         unsafe {
             let _ = self.qemu.run();
         };
+        let post_pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+        let post_sp: GuestAddr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
+        log::debug!(
+            "CevaEmu post-run regs: pc={post_pc:#x} sp={post_sp:#x} primary_exit={:#x} matched_any_exit={} exits={:?}",
+            self.exit_point,
+            self.exit_points.contains(&post_pc),
+            self.exit_points,
+        );
         ExitKind::Ok
     }
 }

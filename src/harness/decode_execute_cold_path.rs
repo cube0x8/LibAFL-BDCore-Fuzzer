@@ -91,6 +91,7 @@ impl CevaTarget for DecodeExecuteColdPath {
             let mut loop_bytes = [0_u8; DEBUG_CODE_BYTES_LEN];
             let _ = harness.qemu().read_mem(entry_point, &mut loop_bytes);
 
+
             bp_hit_count += 1;
 
             log::debug!(

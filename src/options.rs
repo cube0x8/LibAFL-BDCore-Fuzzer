@@ -529,15 +529,6 @@ impl FuzzerOptions {
             .exit();
         }
 
-        if (self.translate_node_link || self.decode_execute_cold_path) && self.exit_points.is_some() {
-            let mut cmd = FuzzerOptions::command();
-            cmd.error(
-                ErrorKind::ArgumentConflict,
-                "Custom --exit-point values are not supported for ceva_emu targeted mutations",
-            )
-            .exit();
-        }
-
         if self.decode_execute_cold_path && self.max_bp_hit_count.is_none() {
             let mut cmd = FuzzerOptions::command();
             cmd.error(

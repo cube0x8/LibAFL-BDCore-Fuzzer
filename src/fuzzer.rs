@@ -256,6 +256,7 @@ impl Fuzzer {
             )?;
             harness.init(
                 self.options.bitdefender_modules.clone(),
+                self.options.exit_points.clone(),
                 self.options.max_bp_hit_count,
             )?;
             AnyHarness::CevaEmu(harness)
