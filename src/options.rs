@@ -60,8 +60,36 @@ pub struct FuzzerOptions {
     #[arg(long, help = "Queue directory", required_unless_present("rerun_input"))]
     pub queue: Option<String>,
 
-    #[arg(long, help = "All the clients have ASAN")]
-    pub asan: bool,
+    #[arg(
+        long,
+        help = "Cpu cores to run with ASAN/QASAN hooks",
+        value_parser = Cores::from_cmdline
+    )]
+    pub asan_cores: Option<Cores>,
+
+    #[arg(
+        long,
+        help = "Temporary debug mode: preload QASAN during target initialization, but do not attach the LibAFL ASAN module during fuzzing",
+        requires = "asan_cores",
+        conflicts_with_all = ["asan_module_only", "asan_preload_and_module"]
+    )]
+    pub asan_preload_only: bool,
+
+    #[arg(
+        long,
+        help = "Temporary debug mode: attach the LibAFL ASAN module during fuzzing, but do not preload QASAN during target initialization",
+        requires = "asan_cores",
+        conflicts_with_all = ["asan_preload_only", "asan_preload_and_module"]
+    )]
+    pub asan_module_only: bool,
+
+    #[arg(
+        long,
+        help = "Temporary debug mode: preload QASAN during target initialization and attach the LibAFL ASAN module during fuzzing",
+        requires = "asan_cores",
+        conflicts_with_all = ["asan_preload_only", "asan_module_only"]
+    )]
+    pub asan_preload_and_module: bool,
 
     #[arg(
         long,
@@ -210,6 +238,16 @@ pub struct FuzzerOptions {
     #[arg(long, help = "Target the ceva_emu TranslateNodeLink function")]
     pub translate_node_link: bool,
 
+    #[arg(long, help = "Target the ceva_emu CevaEmuDecodeExecuteColdPath function")]
+    pub decode_execute_cold_path: bool,
+
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u64).range(2..),
+        help = "Maximum entry-point breakpoint hit count for --decode-execute-cold-path"
+    )]
+    pub max_bp_hit_count: Option<u64>,
+
     #[arg(
         long,
         help = "Entry point for ceva_emu targeted mutations in format module:+offset"
@@ -277,23 +315,38 @@ impl FuzzerOptions {
         }
     }
 
-    /*
-    fn parse_modules(modules_to_instrument: &str) -> Result<Vec<String>, Error> {
-        if modules_to_instrument == "all" {
-            return Ok(Vec::new());
-        }
-
-        let vec_of_modules: Vec<String> = modules_to_instrument.split(',').map(|x| x.to_string()).collect();
-        if vec_of_modules.is_empty() {
-            return Err(Error::empty_optional("--modules must be a comma-separated list or 'all'"));
-        }
-
-        Ok(vec_of_modules)
+    pub fn is_asan_core(&self, core_id: CoreId) -> bool {
+        self.asan_cores
+            .as_ref()
+            .map_or(false, |c| c.contains(core_id))
     }
-    */
 
-    pub fn is_asan(&self) -> bool {
-        self.asan
+    pub fn has_asan_cores(&self) -> bool {
+        self.asan_cores.is_some()
+    }
+
+    pub fn use_asan_preload(&self) -> bool {
+        if !self.has_asan_cores() {
+            return false;
+        }
+
+        if self.asan_module_only {
+            return false;
+        }
+
+        true
+    }
+
+    pub fn use_asan_module(&self) -> bool {
+        if !self.has_asan_cores() {
+            return false;
+        }
+
+        if self.asan_preload_only {
+            return false;
+        }
+
+        true
     }
 
     pub fn is_cmplog_core(&self, core_id: CoreId) -> bool {
@@ -433,16 +486,41 @@ impl FuzzerOptions {
             }
         }
 
-        if self.translate_node_link && self.entry_point.is_none() {
+        if let Some(asan_cores) = &self.asan_cores {
+            for id in &asan_cores.ids {
+                if !self.cores.contains(*id) {
+                    let mut cmd = FuzzerOptions::command();
+                    cmd.error(
+                        ErrorKind::ValueValidation,
+                        format!(
+                            "Asan cores ({}) must be a subset of total cores ({})",
+                            asan_cores.cmdline, self.cores.cmdline
+                        ),
+                    )
+                    .exit();
+                }
+            }
+        }
+
+        if self.translate_node_link && self.decode_execute_cold_path {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
-                ErrorKind::MissingRequiredArgument,
-                "Using --translate-node-link requires --entry-point <module:+offset>",
+                ErrorKind::ArgumentConflict,
+                "Only one ceva target can be used",
             )
             .exit();
         }
 
-        if !self.translate_node_link && self.entry_point.is_some() {
+        if (self.translate_node_link || self.decode_execute_cold_path) && self.entry_point.is_none() {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::MissingRequiredArgument,
+                "Using a ceva_emu target requires --entry-point <module:+offset>",
+            )
+            .exit();
+        }
+
+        if (!self.translate_node_link && !self.decode_execute_cold_path) && self.entry_point.is_some() {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
@@ -451,11 +529,29 @@ impl FuzzerOptions {
             .exit();
         }
 
-        if self.translate_node_link && self.exit_points.is_some() {
+        if (self.translate_node_link || self.decode_execute_cold_path) && self.exit_points.is_some() {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
                 "Custom --exit-point values are not supported for ceva_emu targeted mutations",
+            )
+            .exit();
+        }
+
+        if self.decode_execute_cold_path && self.max_bp_hit_count.is_none() {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::MissingRequiredArgument,
+                "Using --decode-execute-cold-path requires --max-bp-hit-count <count>",
+            )
+            .exit();
+        }
+
+        if !self.decode_execute_cold_path && self.max_bp_hit_count.is_some() {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --max-bp-hit-count requires --decode-execute-cold-path",
             )
             .exit();
         }

@@ -222,7 +222,7 @@ impl BDEngine {
         Ok(resolved)
     }
 
-    fn resolve_module_address(&self, spec: &str, kind: &str) -> Result<GuestAddr, Error> {
+    pub fn resolve_module_address(&self, spec: &str, kind: &str) -> Result<GuestAddr, Error> {
         let (module_name, offset_str) = spec.split_once(":+").ok_or_else(|| {
             Error::unknown(format!(
                 "Invalid {kind} format '{spec}', expected module:+offset"

@@ -3,8 +3,9 @@ use libafl_qemu::Qemu;
 use std::{
     cell::RefCell,
     env,
-    fs::{File, OpenOptions},
+    fs::{self, File, OpenOptions},
     io::{self, Write},
+    path::PathBuf,
     sync::Arc,
 };
 
@@ -123,6 +124,88 @@ impl Fuzzer {
         Ok(args)
     }
 
+    fn qasan_preload_path(&self) -> Result<PathBuf, Error> {
+        let current = env::current_exe()
+            .map_err(|err| Error::unknown(format!("Failed to resolve current executable: {err}")))?;
+        let default_path = fs::canonicalize(current)
+            .map_err(|err| Error::unknown(format!("Failed to canonicalize current executable: {err}")))?
+            .parent()
+            .ok_or_else(|| Error::unknown("Current executable has no parent directory"))?
+            .join("libafl_qemu_asan_host.so");
+
+        let asan_path = env::var_os("CUSTOM_LIBAFL_QEMU_ASAN_PATH")
+            .map(PathBuf::from)
+            .unwrap_or(default_path);
+
+        let asan_path = fs::canonicalize(&asan_path).map_err(|err| {
+            Error::unknown(format!(
+                "Failed to resolve QASAN preload library '{}': {err}",
+                asan_path.display()
+            ))
+        })?;
+
+        if !asan_path.exists() {
+            return Err(Error::unknown(format!(
+                "QASAN preload library does not exist: {}",
+                asan_path.display()
+            )));
+        }
+
+        Ok(asan_path)
+    }
+
+    fn add_or_update_qemu_env(args: &mut Vec<String>, key: &str, value: &str) {
+        let new_entry = format!("{key}={value}");
+
+        for i in 0..args.len().saturating_sub(1) {
+            if args[i] == "-E" && args[i + 1].starts_with(&format!("{key}=")) {
+                args[i + 1] = new_entry;
+                return;
+            }
+        }
+
+        args.insert(1, new_entry);
+        args.insert(1, "-E".into());
+    }
+
+    fn preload_qasan_if_needed(&self, args: &mut Vec<String>) -> Result<(), Error> {
+        if !self.options.use_asan_preload() {
+            return Ok(());
+        }
+
+        let asan_path = self.qasan_preload_path()?;
+        let asan_path = asan_path
+            .to_str()
+            .ok_or_else(|| Error::unknown("QASAN preload path is not valid UTF-8"))?;
+
+        let mut merged_preload = format!("LD_PRELOAD={asan_path}");
+        for i in 0..args.len().saturating_sub(1) {
+            if args[i] == "-E" && args[i + 1].starts_with("LD_PRELOAD=") {
+                merged_preload = format!("{merged_preload} {}", &args[i + 1]["LD_PRELOAD=".len()..]);
+                args.remove(i + 1);
+                args.remove(i);
+                break;
+            }
+        }
+
+        Self::add_or_update_qemu_env(args, "LD_PRELOAD", &merged_preload["LD_PRELOAD=".len()..]);
+
+        if env::var("LIBAFL_QEMU_ASAN_DEBUG").is_ok() {
+            Self::add_or_update_qemu_env(args, "LIBAFL_QEMU_ASAN_DEBUG", "1");
+        }
+
+        if env::var("LIBAFL_QEMU_ASAN_LOG").is_ok() {
+            Self::add_or_update_qemu_env(args, "LIBAFL_QEMU_ASAN_LOG", "1");
+        }
+
+        log::info!(
+            "Preloading QASAN before target initialization from {}",
+            asan_path
+        );
+
+        Ok(())
+    }
+
     #[allow(clippy::unused_self)] // Api should look the same as args above
     fn env(&self) -> Vec<(String, String)> {
         env::vars()
@@ -146,7 +229,8 @@ impl Fuzzer {
             Some("/dev/null")
         };
 
-        let args = self.args()?;
+        let mut args = self.args()?;
+        self.preload_qasan_if_needed(&mut args)?;
         log::debug!("ARGS: {:#?}", args);
 
         let env = self.env();
@@ -158,14 +242,22 @@ impl Fuzzer {
             .scan_profile_every()
             .map(|report_every| Arc::new(ScanProfile::new(report_every)));
 
-        let harness = if self.options.translate_node_link {
+        let harness = if self.options.translate_node_link || self.options.decode_execute_cold_path {
             let entry_point = self.options.entry_point.clone().unwrap();
+            let target_kind = if self.options.translate_node_link {
+                CevaTargetKind::TranslateNodeLink
+            } else {
+                CevaTargetKind::DecodeExecuteColdPath
+            };
             let mut harness = CevaEmuHarness::new(
                 &qemu,
                 entry_point,
-                CevaTargetKind::TranslateNodeLink.build(),
+                target_kind.build(),
             )?;
-            harness.init(self.options.bitdefender_modules.clone())?;
+            harness.init(
+                self.options.bitdefender_modules.clone(),
+                self.options.max_bp_hit_count,
+            )?;
             AnyHarness::CevaEmu(harness)
         } else {
             let mut harness = Harness::new(&qemu)?;

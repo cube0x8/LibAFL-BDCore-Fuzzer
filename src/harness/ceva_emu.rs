@@ -25,12 +25,16 @@ pub struct CevaEmuHarness<'a> {
     pub rcx: GuestAddr,
     pub rdx: GuestAddr,
     pub r8: GuestAddr,
+    pub r9: GuestAddr,
+    pub rdi: GuestAddr,
+    pub rsi: GuestAddr,
+    pub rbx: GuestAddr,
     pub ret_addr: GuestAddr,
     pub exit_point: GuestAddr,
     pub entry_point: GuestAddr,
     pub bd_engine: BDEngine,
     entry_point_spec: String,
-    target: Box<dyn CevaTarget>,
+    target: Option<Box<dyn CevaTarget>>,
 }
 
 impl<'a> CevaEmuHarness<'a> {
@@ -77,20 +81,32 @@ impl<'a> CevaEmuHarness<'a> {
             rcx: 0,
             rdx: 0,
             r8: 0,
+            r9: 0,
+            rdi: 0,
+            rsi: 0,
+            rbx: 0,
             ret_addr: 0,
             exit_point: 0,
             entry_point: 0,
             bd_engine,
             entry_point_spec,
-            target,
+            target: Some(target),
         })
+    }
+
+    pub fn qemu(&self) -> &Qemu {
+        self.qemu
     }
 
     pub fn snapshot_excludes(&self) -> Vec<Range<u64>> {
         vec![]
     }
 
-    pub fn init(&mut self, modules_to_instrument: Option<Vec<String>>) -> Result<(), Error> {
+    pub fn init(
+        &mut self,
+        modules_to_instrument: Option<Vec<String>>,
+        max_bp_hit_count: Option<u64>,
+    ) -> Result<(), Error> {
         self.bd_engine.core_initialization(self.qemu);
         self.bd_engine.instrument_modules(modules_to_instrument);
 
@@ -99,7 +115,7 @@ impl<'a> CevaEmuHarness<'a> {
         self.entry_point = self.bd_engine.resolve_entry_point(&self.entry_point_spec)?;
         println!(
             "Resolved {} entry point at {:#x}",
-            self.target.name(),
+            self.target.as_ref().unwrap().name(),
             self.entry_point
         );
 
@@ -108,35 +124,36 @@ impl<'a> CevaEmuHarness<'a> {
             let _ = self.qemu.run();
         };
 
-        let stack_ptr: GuestAddr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
         let entry_point_return_address: GuestAddr =
             self.qemu.read_return_address().unwrap().try_into().unwrap();
         println!("Return address = {entry_point_return_address:#x}");
 
-        let pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
-        println!("Break at {pc:#x}");
-        let rcx: GuestAddr = self.qemu.read_reg(Regs::Rcx).unwrap().try_into().unwrap();
-        let rdx: GuestAddr = self.qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
-        let r8: GuestAddr = self.qemu.read_reg(Regs::R8).unwrap().try_into().unwrap();
-
-        self.qemu.remove_breakpoint(self.entry_point);
         self.exit_point = entry_point_return_address;
+
+        let mut target = self.target.take().unwrap();
+        target.initialize(self, max_bp_hit_count)?;
+        self.target = Some(target);
+        
+        self.qemu.remove_breakpoint(self.entry_point);
         self.qemu.set_breakpoint(self.exit_point);
 
-        self.target
-            .initialize(self.qemu, &self.bd_engine)?;
-
-        self.pc = pc;
-        self.stack_ptr = stack_ptr;
-        self.rcx = rcx;
-        self.rdx = rdx;
-        self.r8 = r8;
+        self.pc = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+        println!("Snapshot at {:#x}", self.pc);
+        self.stack_ptr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
+        self.rcx = self.qemu.read_reg(Regs::Rcx).unwrap().try_into().unwrap();
+        self.rdx = self.qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
+        self.r8 = self.qemu.read_reg(Regs::R8).unwrap().try_into().unwrap();
+        self.r9 = self.qemu.read_reg(Regs::R9).unwrap().try_into().unwrap();
+        self.rdi = self.qemu.read_reg(Regs::Rdi).unwrap().try_into().unwrap();
+        self.rsi = self.qemu.read_reg(Regs::Rsi).unwrap().try_into().unwrap();
+        self.rbx = self.qemu.read_reg(Regs::Rbx).unwrap().try_into().unwrap();
         self.ret_addr = entry_point_return_address;
 
         Ok(())
     }
 
     fn reset(&self) -> Result<(), Error> {
+        // here we reset only abi registers
         self.qemu.write_reg(Regs::Pc, GuestReg::try_from(self.pc).unwrap())
             .map_err(|e| Error::unknown(format!("Failed to restore PC: {e:?}")))?;
         self.qemu.write_reg(Regs::Sp, GuestReg::try_from(self.stack_ptr).unwrap())
@@ -147,6 +164,15 @@ impl<'a> CevaEmuHarness<'a> {
             .map_err(|e| Error::unknown(format!("Failed to restore RDX: {e:?}")))?;
         self.qemu.write_reg(Regs::R8, GuestReg::try_from(self.r8).unwrap())
             .map_err(|e| Error::unknown(format!("Failed to restore R8: {e:?}")))?;
+        self.qemu.write_reg(Regs::R9, GuestReg::try_from(self.r9).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R9: {e:?}")))?;
+
+        // reset additional registers/memory based on the target
+        self.target
+            .as_ref()
+            .unwrap()
+            .reset(self)?;
+
         Ok(())
     }
 
@@ -165,12 +191,24 @@ impl<'a> CevaEmuHarness<'a> {
         let reset_started_at = Instant::now();
         self.reset().unwrap();
         self.target
+             .as_ref()
+             .unwrap()
              .prepare_input(self.qemu, buf, len)
              .unwrap();
 
         if let Some(scan_profile) = scan_profile {
             scan_profile.record_input_reset(reset_started_at.elapsed());
 
+            log::debug!(
+                "CevaEmu pre-run regs: pc={:#x} sp={:#x} rcx={:#x} rdx={:#x} r8={:#x} ret={:#x} exit={:#x}",
+                self.qemu.read_reg(Regs::Pc).unwrap(),
+                self.qemu.read_reg(Regs::Sp).unwrap(),
+                self.qemu.read_reg(Regs::Rcx).unwrap(),
+                self.qemu.read_reg(Regs::Rdx).unwrap(),
+                self.qemu.read_reg(Regs::R8).unwrap(),
+                self.ret_addr,
+                self.exit_point,
+            );
             let guest_exec_started_at = Instant::now();
             unsafe {
                 let _ = self.qemu.run();
@@ -179,6 +217,16 @@ impl<'a> CevaEmuHarness<'a> {
             return ExitKind::Ok;
         }
 
+        log::debug!(
+            "CevaEmu pre-run regs: pc={:#x} sp={:#x} rcx={:#x} rdx={:#x} r8={:#x} ret={:#x} exit={:#x}",
+            self.qemu.read_reg(Regs::Pc).unwrap(),
+            self.qemu.read_reg(Regs::Sp).unwrap(),
+            self.qemu.read_reg(Regs::Rcx).unwrap(),
+            self.qemu.read_reg(Regs::Rdx).unwrap(),
+            self.qemu.read_reg(Regs::R8).unwrap(),
+            self.ret_addr,
+            self.exit_point,
+        );
         unsafe {
             let _ = self.qemu.run();
         };

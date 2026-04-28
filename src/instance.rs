@@ -717,4 +717,26 @@ mod tests {
             Some("/tmp/pe-report.txt".into())
         );
     }
+
+    #[test]
+    fn asan_cores_can_be_enabled_explicitly() {
+        let options = FuzzerOptions::parse_from([
+            "qemu_bdclient",
+            "--input",
+            "in",
+            "--output",
+            "out",
+            "--queue",
+            "queue",
+            "--cores",
+            "1,2,3",
+            "--asan-cores",
+            "2,3",
+            "--",
+            "target",
+        ]);
+
+        assert!(options.is_asan_core(libafl_bolts::core_affinity::CoreId(2)));
+        assert!(!options.is_asan_core(libafl_bolts::core_affinity::CoreId(1)));
+    }
 }

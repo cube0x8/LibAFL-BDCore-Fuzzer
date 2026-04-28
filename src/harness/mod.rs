@@ -2,6 +2,7 @@ mod ceva_emu;
 mod ceva_target;
 mod standard;
 mod translate_node_link;
+mod decode_execute_cold_path;
 
 use std::ops::Range;
 
