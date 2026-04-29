@@ -10,15 +10,15 @@ use std::{
 };
 
 use clap::Parser;
-#[cfg(not(feature = "simplemgr"))]
-use libafl::{
-    events::{EventConfig, Launcher},
-    monitors::{Monitor, MultiMonitor, PrometheusMonitor},
-    Error,
-};
 #[cfg(feature = "simplemgr")]
 use libafl::{
     events::{ClientDescription, SimpleEventManager},
+    monitors::{Monitor, MultiMonitor, PrometheusMonitor},
+    Error,
+};
+#[cfg(not(feature = "simplemgr"))]
+use libafl::{
+    events::{EventConfig, Launcher},
     monitors::{Monitor, MultiMonitor, PrometheusMonitor},
     Error,
 };
@@ -125,10 +125,13 @@ impl Fuzzer {
     }
 
     fn qasan_preload_path(&self) -> Result<PathBuf, Error> {
-        let current = env::current_exe()
-            .map_err(|err| Error::unknown(format!("Failed to resolve current executable: {err}")))?;
+        let current = env::current_exe().map_err(|err| {
+            Error::unknown(format!("Failed to resolve current executable: {err}"))
+        })?;
         let default_path = fs::canonicalize(current)
-            .map_err(|err| Error::unknown(format!("Failed to canonicalize current executable: {err}")))?
+            .map_err(|err| {
+                Error::unknown(format!("Failed to canonicalize current executable: {err}"))
+            })?
             .parent()
             .ok_or_else(|| Error::unknown("Current executable has no parent directory"))?
             .join("libafl_qemu_asan_host.so");
@@ -181,7 +184,8 @@ impl Fuzzer {
         let mut merged_preload = format!("LD_PRELOAD={asan_path}");
         for i in 0..args.len().saturating_sub(1) {
             if args[i] == "-E" && args[i + 1].starts_with("LD_PRELOAD=") {
-                merged_preload = format!("{merged_preload} {}", &args[i + 1]["LD_PRELOAD=".len()..]);
+                merged_preload =
+                    format!("{merged_preload} {}", &args[i + 1]["LD_PRELOAD=".len()..]);
                 args.remove(i + 1);
                 args.remove(i);
                 break;
@@ -242,21 +246,24 @@ impl Fuzzer {
             .scan_profile_every()
             .map(|report_every| Arc::new(ScanProfile::new(report_every)));
 
-        let harness = if self.options.translate_node_link || self.options.decode_execute_cold_path {
+        let harness = if self.options.translate_node_link
+            || self.options.decode_execute_cold_path
+            || self.options.petite_a4
+            || self.options.petite_2000
+        {
             let entry_point = self.options.entry_point.clone().unwrap();
             let target_kind = if self.options.translate_node_link {
                 CevaTargetKind::TranslateNodeLink
+            } else if self.options.petite_a4 {
+                CevaTargetKind::PetiteA4
+            } else if self.options.petite_2000 {
+                CevaTargetKind::Petite2000
             } else {
                 CevaTargetKind::DecodeExecuteColdPath
             };
-            let mut harness = CevaEmuHarness::new(
-                &qemu,
-                entry_point,
-                target_kind.build(),
-            )?;
+            let mut harness = CevaEmuHarness::new(&qemu, entry_point, target_kind.build())?;
             harness.init(
                 self.options.bitdefender_modules.clone(),
-                self.options.exit_points.clone(),
                 self.options.max_bp_hit_count,
             )?;
             AnyHarness::CevaEmu(harness)

@@ -2,8 +2,9 @@ use libafl::Error;
 use libafl_qemu::{GuestReg, Qemu};
 
 use super::ceva_emu::CevaEmuHarness;
-use super::translate_node_link::TranslateNodeLinkTarget;
 use super::decode_execute_cold_path::DecodeExecuteColdPath;
+use super::petite_unpack::{Petite2000Target, PetiteA4Target};
+use super::translate_node_link::TranslateNodeLinkTarget;
 
 pub trait CevaTarget {
     fn name(&self) -> &'static str;
@@ -16,17 +17,9 @@ pub trait CevaTarget {
         Ok(())
     }
 
-    fn prepare_input(
-        &self,
-        qemu: &Qemu,
-        input: &[u8],
-        input_len: GuestReg,
-    ) -> Result<(), Error>;
+    fn prepare_input(&self, qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error>;
 
-    fn reset(
-        &self,
-        _harness: &CevaEmuHarness<'_>,
-    ) -> Result<(), Error> {
+    fn reset(&self, _harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
         Ok(())
     }
 }
@@ -35,6 +28,8 @@ pub trait CevaTarget {
 pub enum CevaTargetKind {
     TranslateNodeLink,
     DecodeExecuteColdPath,
+    PetiteA4,
+    Petite2000,
 }
 
 impl CevaTargetKind {
@@ -42,6 +37,8 @@ impl CevaTargetKind {
         match self {
             CevaTargetKind::TranslateNodeLink => Box::new(TranslateNodeLinkTarget::default()),
             CevaTargetKind::DecodeExecuteColdPath => Box::new(DecodeExecuteColdPath::default()),
+            CevaTargetKind::PetiteA4 => Box::new(PetiteA4Target::default()),
+            CevaTargetKind::Petite2000 => Box::new(Petite2000Target::default()),
         }
     }
 }

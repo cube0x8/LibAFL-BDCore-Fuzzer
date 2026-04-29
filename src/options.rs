@@ -238,8 +238,23 @@ pub struct FuzzerOptions {
     #[arg(long, help = "Target the ceva_emu TranslateNodeLink function")]
     pub translate_node_link: bool,
 
-    #[arg(long, help = "Target the ceva_emu CevaEmuDecodeExecuteColdPath function")]
+    #[arg(
+        long,
+        help = "Target the ceva_emu CevaEmuDecodeExecuteColdPath function"
+    )]
     pub decode_execute_cold_path: bool,
+
+    #[arg(
+        long,
+        help = "Target petite.xmd worker entry and mutate the a4 staged entry-stub buffer"
+    )]
+    pub petite_a4: bool,
+
+    #[arg(
+        long,
+        help = "Target petite.xmd after the second-stage 0x2000 read and mutate that filled buffer"
+    )]
+    pub petite_2000: bool,
 
     #[arg(
         long,
@@ -267,6 +282,13 @@ pub struct FuzzerOptions {
 }
 
 impl FuzzerOptions {
+    fn any_ceva_target_selected(&self) -> bool {
+        self.translate_node_link
+            || self.decode_execute_cold_path
+            || self.petite_a4
+            || self.petite_2000
+    }
+
     fn any_pe_mutation_group_selected(&self) -> bool {
         self.pe_header
             || self.sections
@@ -502,7 +524,17 @@ impl FuzzerOptions {
             }
         }
 
-        if self.translate_node_link && self.decode_execute_cold_path {
+        if [
+            self.translate_node_link,
+            self.decode_execute_cold_path,
+            self.petite_a4,
+            self.petite_2000,
+        ]
+        .into_iter()
+        .filter(|enabled| *enabled)
+        .count()
+            > 1
+        {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
@@ -511,7 +543,7 @@ impl FuzzerOptions {
             .exit();
         }
 
-        if (self.translate_node_link || self.decode_execute_cold_path) && self.entry_point.is_none() {
+        if self.any_ceva_target_selected() && self.entry_point.is_none() {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::MissingRequiredArgument,
@@ -520,7 +552,7 @@ impl FuzzerOptions {
             .exit();
         }
 
-        if (!self.translate_node_link && !self.decode_execute_cold_path) && self.entry_point.is_some() {
+        if !self.any_ceva_target_selected() && self.entry_point.is_some() {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,

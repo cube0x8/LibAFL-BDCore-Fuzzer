@@ -1,8 +1,9 @@
 mod ceva_emu;
 mod ceva_target;
+mod decode_execute_cold_path;
+mod petite_unpack;
 mod standard;
 mod translate_node_link;
-mod decode_execute_cold_path;
 
 use std::ops::Range;
 

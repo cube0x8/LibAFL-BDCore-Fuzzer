@@ -9,9 +9,7 @@ use libafl::{
     Error,
 };
 use libafl_bolts::AsSlice;
-use libafl_qemu::{
-    elf::EasyElf, ArchExtras, GuestAddr, GuestReg, MmapPerms, Qemu, Regs,
-};
+use libafl_qemu::{elf::EasyElf, ArchExtras, GuestAddr, GuestReg, MmapPerms, Qemu, Regs};
 use std::{
     ops::Range,
     thread,
