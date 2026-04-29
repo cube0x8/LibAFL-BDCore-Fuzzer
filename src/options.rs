@@ -258,6 +258,24 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
+        help = "Target pec3.xmd worker entry and mutate the a4 staged entry-stub buffer"
+    )]
+    pub pec3_a4: bool,
+
+    #[arg(
+        long,
+        help = "Target pec3.xmd after the first 0x40 reader-backed read and mutate that filled buffer"
+    )]
+    pub pec3_40: bool,
+
+    #[arg(
+        long,
+        help = "Target pec3.xmd after the later 0x28 reader-backed read and mutate that filled buffer"
+    )]
+    pub pec3_28: bool,
+
+    #[arg(
+        long,
         value_parser = clap::value_parser!(u64).range(2..),
         help = "Maximum entry-point breakpoint hit count for --decode-execute-cold-path"
     )]
@@ -287,6 +305,9 @@ impl FuzzerOptions {
             || self.decode_execute_cold_path
             || self.petite_a4
             || self.petite_2000
+            || self.pec3_a4
+            || self.pec3_40
+            || self.pec3_28
     }
 
     fn any_pe_mutation_group_selected(&self) -> bool {
@@ -529,6 +550,9 @@ impl FuzzerOptions {
             self.decode_execute_cold_path,
             self.petite_a4,
             self.petite_2000,
+            self.pec3_a4,
+            self.pec3_40,
+            self.pec3_28,
         ]
         .into_iter()
         .filter(|enabled| *enabled)

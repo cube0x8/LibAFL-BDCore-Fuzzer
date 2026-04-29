@@ -151,9 +151,14 @@ impl<'a> CevaEmuHarness<'a> {
         self.rdx = self.qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
         self.r8 = self.qemu.read_reg(Regs::R8).unwrap().try_into().unwrap();
         self.r9 = self.qemu.read_reg(Regs::R9).unwrap().try_into().unwrap();
+        self.rbp = self.qemu.read_reg(Regs::Rbp).unwrap().try_into().unwrap();
         self.rdi = self.qemu.read_reg(Regs::Rdi).unwrap().try_into().unwrap();
         self.rsi = self.qemu.read_reg(Regs::Rsi).unwrap().try_into().unwrap();
         self.rbx = self.qemu.read_reg(Regs::Rbx).unwrap().try_into().unwrap();
+        self.r12 = self.qemu.read_reg(Regs::R12).unwrap().try_into().unwrap();
+        self.r13 = self.qemu.read_reg(Regs::R13).unwrap().try_into().unwrap();
+        self.r14 = self.qemu.read_reg(Regs::R14).unwrap().try_into().unwrap();
+        self.r15 = self.qemu.read_reg(Regs::R15).unwrap().try_into().unwrap();
         self.ret_addr = entry_point_return_address;
 
         Ok(())
@@ -179,6 +184,21 @@ impl<'a> CevaEmuHarness<'a> {
         self.qemu
             .write_reg(Regs::R9, GuestReg::try_from(self.r9).unwrap())
             .map_err(|e| Error::unknown(format!("Failed to restore R9: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::Rbp, GuestReg::try_from(self.rbp).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore RBP: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::R12, GuestReg::try_from(self.r12).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R12: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::R13, GuestReg::try_from(self.r13).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R13: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::R14, GuestReg::try_from(self.r14).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R14: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::R15, GuestReg::try_from(self.r15).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R15: {e:?}")))?;
 
         // reset additional registers/memory based on the target
         self.target.as_ref().unwrap().reset(self)?;

@@ -250,6 +250,9 @@ impl Fuzzer {
             || self.options.decode_execute_cold_path
             || self.options.petite_a4
             || self.options.petite_2000
+            || self.options.pec3_a4
+            || self.options.pec3_40
+            || self.options.pec3_28
         {
             let entry_point = self.options.entry_point.clone().unwrap();
             let target_kind = if self.options.translate_node_link {
@@ -258,6 +261,12 @@ impl Fuzzer {
                 CevaTargetKind::PetiteA4
             } else if self.options.petite_2000 {
                 CevaTargetKind::Petite2000
+            } else if self.options.pec3_a4 {
+                CevaTargetKind::Pec3A4
+            } else if self.options.pec3_40 {
+                CevaTargetKind::Pec3Read40
+            } else if self.options.pec3_28 {
+                CevaTargetKind::Pec3Read28
             } else {
                 CevaTargetKind::DecodeExecuteColdPath
             };
