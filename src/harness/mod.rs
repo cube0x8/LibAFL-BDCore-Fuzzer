@@ -1,3 +1,4 @@
+mod beria_vm;
 mod ceva_emu;
 mod ceva_target;
 mod decode_execute_cold_path;
