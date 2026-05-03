@@ -261,6 +261,12 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
+        help = "Target beria.xmd BeriaVMParser and mutate exec_ctx->work_buf"
+    )]
+    pub beria_vm: bool,
+
+    #[arg(
+        long,
         help = "Target petite.xmd worker entry and mutate the a4 staged entry-stub buffer"
     )]
     pub petite_a4: bool,
@@ -318,6 +324,7 @@ impl FuzzerOptions {
     fn any_ceva_target_selected(&self) -> bool {
         self.translate_node_link
             || self.decode_execute_cold_path
+            || self.beria_vm
             || self.petite_a4
             || self.petite_2000
             || self.pec3_a4
@@ -605,6 +612,7 @@ impl FuzzerOptions {
         if [
             self.translate_node_link,
             self.decode_execute_cold_path,
+            self.beria_vm,
             self.petite_a4,
             self.petite_2000,
             self.pec3_a4,

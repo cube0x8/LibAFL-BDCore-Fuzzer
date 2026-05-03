@@ -248,6 +248,7 @@ impl Fuzzer {
 
         let harness = if self.options.translate_node_link
             || self.options.decode_execute_cold_path
+            || self.options.beria_vm
             || self.options.petite_a4
             || self.options.petite_2000
             || self.options.pec3_a4
@@ -257,6 +258,8 @@ impl Fuzzer {
             let entry_point = self.options.entry_point.clone().unwrap();
             let target_kind = if self.options.translate_node_link {
                 CevaTargetKind::TranslateNodeLink
+            } else if self.options.beria_vm {
+                CevaTargetKind::BeriaVm
             } else if self.options.petite_a4 {
                 CevaTargetKind::PetiteA4
             } else if self.options.petite_2000 {

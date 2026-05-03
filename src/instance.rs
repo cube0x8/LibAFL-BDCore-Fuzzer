@@ -444,6 +444,7 @@ where
             executor
                 .run_target(&mut fuzzer, &mut state, &mut self.mgr, &input)
                 .expect("Error running target");
+            drop(executor);
 
             log::debug!("Coverage file generate correctly. Compressing...");
 

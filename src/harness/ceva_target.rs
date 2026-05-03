@@ -1,6 +1,7 @@
 use libafl::Error;
 use libafl_qemu::{GuestReg, Qemu};
 
+use super::beria_vm::BeriaVmTarget;
 use super::ceva_emu::CevaEmuHarness;
 use super::decode_execute_cold_path::DecodeExecuteColdPath;
 use super::pec3_unpack::{Pec3A4Target, Pec3Read28Target, Pec3Read40Target};
@@ -29,6 +30,7 @@ pub trait CevaTarget {
 pub enum CevaTargetKind {
     TranslateNodeLink,
     DecodeExecuteColdPath,
+    BeriaVm,
     PetiteA4,
     Petite2000,
     Pec3A4,
@@ -41,6 +43,7 @@ impl CevaTargetKind {
         match self {
             CevaTargetKind::TranslateNodeLink => Box::new(TranslateNodeLinkTarget::default()),
             CevaTargetKind::DecodeExecuteColdPath => Box::new(DecodeExecuteColdPath::default()),
+            CevaTargetKind::BeriaVm => Box::new(BeriaVmTarget::default()),
             CevaTargetKind::PetiteA4 => Box::new(PetiteA4Target::default()),
             CevaTargetKind::Petite2000 => Box::new(Petite2000Target::default()),
             CevaTargetKind::Pec3A4 => Box::new(Pec3A4Target::default()),
