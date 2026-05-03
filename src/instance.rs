@@ -49,12 +49,13 @@ use libafl_qemu::{
 };
 
 use libafl_pe_mutator::{
-    core::{
-        PeMutationCategory, PeMutationCategorySet, PeMutationKind, PeMutationSet, PeMutatorConfig,
-    },
-    PeMutator, PeMutatorOptions,
+    BytesToPeMutator, PeMutator, PeMutatorOptions, SectionBodyMutator,
 };
 use libafl_targets::{edges_map_mut_ptr, EDGES_MAP_DEFAULT_SIZE, MAX_EDGES_FOUND};
+use pe_mutator_core::{
+    PeMutationCategory, PeMutationCategorySet, PeMutationKind, PeMutationSet, PeMutatorConfig,
+    StackDepthConfig,
+};
 use serde::{Deserialize, Serialize};
 
 use typed_builder::TypedBuilder;
@@ -218,8 +219,10 @@ fn pe_mutator_config_from_options(options: &FuzzerOptions) -> PeMutatorConfig {
     }
 
     PeMutatorConfig {
-        min_stack_depth: options.pe_min_stack_depth,
-        max_stack_depth: options.pe_max_stack_depth,
+        stack: StackDepthConfig {
+            min_stack_depth: options.pe_min_stack_depth,
+            max_stack_depth: options.pe_max_stack_depth,
+        },
         enabled_categories,
         enabled_mutations,
         ..PeMutatorConfig::default()
@@ -236,6 +239,16 @@ fn pe_mutator_from_options(options: &FuzzerOptions) -> PeMutator {
                 .then(|| "/tmp/pe-report.txt".into()),
             max_size: Some(MAX_TARGET_INPUT_SIZE),
         },
+    )
+}
+
+fn pe_section_body_mutator_from_options(options: &FuzzerOptions) -> BytesToPeMutator<SectionBodyMutator> {
+    let section_index = options
+        .section_index
+        .expect("--section-body-mutator requires --section-index");
+    BytesToPeMutator::with_max_size(
+        SectionBodyMutator::with_options(Some(MAX_TARGET_INPUT_SIZE), Some(section_index)),
+        MAX_TARGET_INPUT_SIZE,
     )
 }
 
@@ -473,7 +486,9 @@ where
                 I2SRandReplace::new()
             )));
 
-            let power_mutator = if self.options.pe_mutator {
+            let power_mutator = if self.options.section_body_mutator {
+                BDCoreMutator::PeSectionBody(pe_section_body_mutator_from_options(self.options))
+            } else if self.options.pe_mutator {
                 BDCoreMutator::Pe(pe_mutator_from_options(self.options))
             } else {
                 if self.options.fixed_size_mutations {
@@ -520,7 +535,21 @@ where
                 &mut self.mgr,
                 self.options.timeout,
             )?;
-            if self.options.pe_mutator {
+            if self.options.section_body_mutator {
+                let mutator = pe_section_body_mutator_from_options(self.options);
+                match self.options.sync_dir() {
+                    Some(sync_dir) => {
+                        let sync_stage =
+                            SyncFromDiskStage::with_from_file(sync_dir, Duration::from_secs(5));
+                        let mut stages = tuple_list!(StdMutationalStage::new(mutator), sync_stage);
+                        Ok(self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)?)
+                    }
+                    None => {
+                        let mut stages = tuple_list!(StdMutationalStage::new(mutator));
+                        Ok(self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)?)
+                    }
+                }
+            } else if self.options.pe_mutator {
                 let mutator = pe_mutator_from_options(self.options);
                 match self.options.sync_dir() {
                     Some(sync_dir) => {
@@ -611,7 +640,8 @@ mod tests {
     use super::pe_mutator_config_from_options;
     use crate::options::FuzzerOptions;
     use clap::Parser;
-    use libafl_pe_mutator::core::{PeMutationCategory, PeMutationKind};
+    use libafl_bolts::Named;
+    use pe_mutator_core::{PeMutationCategory, PeMutationKind};
 
     fn base_options() -> FuzzerOptions {
         FuzzerOptions {
@@ -696,8 +726,8 @@ mod tests {
 
         let config = pe_mutator_config_from_options(&options);
 
-        assert_eq!(config.min_stack_depth, 3);
-        assert_eq!(config.max_stack_depth, 6);
+        assert_eq!(config.stack.min_stack_depth, 3);
+        assert_eq!(config.stack.max_stack_depth, 6);
     }
 
     #[test]
@@ -716,6 +746,27 @@ mod tests {
             mutator.reporting_path().map(|path| path.to_string_lossy()),
             Some("/tmp/pe-report.txt".into())
         );
+    }
+
+    #[test]
+    fn section_body_mutator_mode_is_recognized_as_pe_mutation_mode() {
+        let mut options = base_options();
+        options.pe_mutator = false;
+        options.section_body_mutator = true;
+        options.section_index = Some(3);
+
+        assert!(options.uses_pe_mutator());
+    }
+
+    #[test]
+    fn section_body_mutator_can_be_built_with_target_index() {
+        let mut options = base_options();
+        options.pe_mutator = false;
+        options.section_body_mutator = true;
+        options.section_index = Some(3);
+
+        let mutator = super::pe_section_body_mutator_from_options(&options);
+        assert_eq!(mutator.inner().name(), "SectionBodyMutator");
     }
 
     #[test]

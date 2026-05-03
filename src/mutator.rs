@@ -21,7 +21,7 @@ use libafl_bolts::{
     Named,
     tuples::{tuple_list, tuple_list_type},
 };
-use libafl_pe_mutator::PeMutator;
+use libafl_pe_mutator::{BytesToPeMutator, PeMutator, SectionBodyMutator};
 
 pub type FixedSizeHavocMutationsType = tuple_list_type!(
     BitFlipMutator,
@@ -70,6 +70,7 @@ pub fn havoc_fixed_size_mutations() -> FixedSizeHavocMutationsType {
 
 pub enum BDCoreMutator {
     Pe(PeMutator),
+    PeSectionBody(BytesToPeMutator<SectionBodyMutator>),
     Mopt(StdMOptMutator<HavocMutationsType>),
     MoptFixed(StdMOptMutator<FixedSizeHavocMutationsType>),
 }
@@ -78,6 +79,7 @@ impl Named for BDCoreMutator {
     fn name(&self) -> &Cow<'static, str> {
         match self {
             Self::Pe(m) => m.name(),
+            Self::PeSectionBody(m) => m.name(),
             Self::Mopt(m) => m.name(),
             Self::MoptFixed(m) => m.name(),
         }
@@ -91,6 +93,7 @@ where
     fn mutate(&mut self, state: &mut S, input: &mut BytesInput) -> Result<MutationResult, Error> {
         match self {
             Self::Pe(m) => m.mutate(state, input),
+            Self::PeSectionBody(m) => m.mutate(state, input),
             Self::Mopt(m) => m.mutate(state, input),
             Self::MoptFixed(m) => m.mutate(state, input),
         }
@@ -99,6 +102,7 @@ where
     fn post_exec(&mut self, state: &mut S, new_corpus_id: Option<CorpusId>) -> Result<(), Error> {
         match self {
             Self::Pe(m) => m.post_exec(state, new_corpus_id),
+            Self::PeSectionBody(m) => m.post_exec(state, new_corpus_id),
             Self::Mopt(m) => m.post_exec(state, new_corpus_id),
             Self::MoptFixed(m) => m.post_exec(state, new_corpus_id),
         }

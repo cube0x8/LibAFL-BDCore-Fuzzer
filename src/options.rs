@@ -99,6 +99,21 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
+        help = "Use only the PE section body mutator. Requires --section-index and conflicts with --pe-mutator",
+        requires = "section_index",
+        conflicts_with = "pe_mutator"
+    )]
+    pub section_body_mutator: bool,
+
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(usize),
+        help = "Target section index for --section-body-mutator"
+    )]
+    pub section_index: Option<usize>,
+
+    #[arg(
+        long,
         help = "Enable PE mutator reporting to /tmp/pe-report.txt. Requires --pe-mutator"
     )]
     pub pe_mutator_reporting: bool,
@@ -319,6 +334,10 @@ impl FuzzerOptions {
             || self.data_dir
     }
 
+    pub fn uses_pe_mutator(&self) -> bool {
+        self.pe_mutator || self.section_body_mutator
+    }
+
     fn absolutize_path(path: PathBuf) -> PathBuf {
         if path.is_absolute() {
             path
@@ -484,6 +503,44 @@ impl FuzzerOptions {
             cmd.error(
                 ErrorKind::ArgumentConflict,
                 "Using --pe-header/--sections/--assembly/--export-dir/--resource-dir/--data-dir requires --pe-mutator",
+            )
+            .exit();
+        }
+
+        if self.section_index.is_some() && !self.section_body_mutator {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --section-index requires --section-body-mutator",
+            )
+            .exit();
+        }
+
+        if self.section_body_mutator && self.pe_mutator_reporting {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --pe-mutator-reporting requires --pe-mutator and is not supported with --section-body-mutator",
+            )
+            .exit();
+        }
+
+        if self.section_body_mutator && self.any_pe_mutation_group_selected() {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --section-body-mutator conflicts with --pe-header/--sections/--assembly/--export-dir/--resource-dir/--data-dir",
+            )
+            .exit();
+        }
+
+        if self.section_body_mutator
+            && (self.pe_min_stack_depth != 2 || self.pe_max_stack_depth != 2)
+        {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --pe-min-stack-depth/--pe-max-stack-depth is not supported with --section-body-mutator",
             )
             .exit();
         }

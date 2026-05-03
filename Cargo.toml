@@ -41,6 +41,7 @@ libafl = { path = "../LibAFL/crates/libafl", features = ["prometheus_monitor", "
 libafl_bolts = { path = "../LibAFL/crates/libafl_bolts/" }
 libafl_qemu = { path = "../LibAFL/crates/libafl_qemu/", features = ["usermode", "x86_64"] }
 libafl_pe_mutator = { path = "../PEMutator/crates/pe-mutator-libafl", package = "pe-mutator-libafl" }
+pe_mutator_core = { path = "../PEMutator/crates/pe-mutator-core", package = "pe-mutator-core" }
 libafl_targets = { path = "../LibAFL/crates/libafl_targets" }
 rangemap = { version = "1.3" }
 lazy_static = "1.4"
