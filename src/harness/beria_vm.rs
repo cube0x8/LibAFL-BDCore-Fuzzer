@@ -14,25 +14,6 @@ fn format_bytes(bytes: &[u8]) -> String {
 }
 
 fn restore_nonvolatile_regs(harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
-    let qemu = harness.qemu();
-
-    qemu.write_reg(Regs::Rbx, GuestReg::try_from(harness.rbx).unwrap())
-        .map_err(|e| Error::unknown(format!("Failed to restore RBX: {e:?}")))?;
-    qemu.write_reg(Regs::Rbp, GuestReg::try_from(harness.rbp).unwrap())
-        .map_err(|e| Error::unknown(format!("Failed to restore RBP: {e:?}")))?;
-    qemu.write_reg(Regs::Rdi, GuestReg::try_from(harness.rdi).unwrap())
-        .map_err(|e| Error::unknown(format!("Failed to restore RDI: {e:?}")))?;
-    qemu.write_reg(Regs::Rsi, GuestReg::try_from(harness.rsi).unwrap())
-        .map_err(|e| Error::unknown(format!("Failed to restore RSI: {e:?}")))?;
-    qemu.write_reg(Regs::R12, GuestReg::try_from(harness.r12).unwrap())
-        .map_err(|e| Error::unknown(format!("Failed to restore R12: {e:?}")))?;
-    qemu.write_reg(Regs::R13, GuestReg::try_from(harness.r13).unwrap())
-        .map_err(|e| Error::unknown(format!("Failed to restore R13: {e:?}")))?;
-    qemu.write_reg(Regs::R14, GuestReg::try_from(harness.r14).unwrap())
-        .map_err(|e| Error::unknown(format!("Failed to restore R14: {e:?}")))?;
-    qemu.write_reg(Regs::R15, GuestReg::try_from(harness.r15).unwrap())
-        .map_err(|e| Error::unknown(format!("Failed to restore R15: {e:?}")))?;
-
     Ok(())
 }
 

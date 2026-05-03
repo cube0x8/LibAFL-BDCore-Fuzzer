@@ -8,6 +8,8 @@ use std::{
     path::PathBuf,
 };
 
+use crate::harness::{DEFAULT_MAX_INPUT_SIZE, DEFAULT_MAX_TARGET_INPUT_SIZE};
+
 #[derive(Default)]
 pub struct Version;
 
@@ -195,6 +197,22 @@ pub struct FuzzerOptions {
 
     #[arg(long, help = "Profile the ScanFile hot path and log aggregate timings")]
     pub profile_scanfile: bool,
+
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_INPUT_SIZE,
+        value_parser = FuzzerOptions::parse_positive_usize,
+        help = "Guest input buffer mapping size for the standard ScanFile harness"
+    )]
+    pub max_input_size: usize,
+
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_TARGET_INPUT_SIZE,
+        value_parser = FuzzerOptions::parse_positive_usize,
+        help = "Maximum input bytes sent to the target and maximum serialized PE mutator output"
+    )]
+    pub max_target_input_size: usize,
 
     #[arg(
         long,

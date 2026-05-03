@@ -162,7 +162,7 @@ where
 }
 
 use crate::{
-    harness::{FuzzHarness, MAX_TARGET_INPUT_SIZE},
+    harness::FuzzHarness,
     mutator::{havoc_fixed_size_mutations, BDCoreMutator},
     options::FuzzerOptions,
     scan_profile::ScanProfile,
@@ -237,18 +237,20 @@ fn pe_mutator_from_options(options: &FuzzerOptions) -> PeMutator {
             reporting: options
                 .pe_mutator_reporting
                 .then(|| "/tmp/pe-report.txt".into()),
-            max_size: Some(MAX_TARGET_INPUT_SIZE),
+            max_size: Some(options.max_target_input_size),
         },
     )
 }
 
-fn pe_section_body_mutator_from_options(options: &FuzzerOptions) -> BytesToPeMutator<SectionBodyMutator> {
+fn pe_section_body_mutator_from_options(
+    options: &FuzzerOptions,
+) -> BytesToPeMutator<SectionBodyMutator> {
     let section_index = options
         .section_index
         .expect("--section-body-mutator requires --section-index");
     BytesToPeMutator::with_max_size(
-        SectionBodyMutator::with_options(Some(MAX_TARGET_INPUT_SIZE), Some(section_index)),
-        MAX_TARGET_INPUT_SIZE,
+        SectionBodyMutator::with_options(Some(options.max_target_input_size), Some(section_index)),
+        options.max_target_input_size,
     )
 }
 

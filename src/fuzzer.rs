@@ -273,14 +273,23 @@ impl Fuzzer {
             } else {
                 CevaTargetKind::DecodeExecuteColdPath
             };
-            let mut harness = CevaEmuHarness::new(&qemu, entry_point, target_kind.build())?;
+            let mut harness = CevaEmuHarness::new(
+                &qemu,
+                entry_point,
+                target_kind.build(),
+                self.options.max_target_input_size,
+            )?;
             harness.init(
                 self.options.bitdefender_modules.clone(),
                 self.options.max_bp_hit_count,
             )?;
             AnyHarness::CevaEmu(harness)
         } else {
-            let mut harness = Harness::new(&qemu)?;
+            let mut harness = Harness::new(
+                &qemu,
+                self.options.max_input_size,
+                self.options.max_target_input_size,
+            )?;
             harness.init(
                 self.options.bitdefender_modules.clone(),
                 self.options.exit_points.clone(),

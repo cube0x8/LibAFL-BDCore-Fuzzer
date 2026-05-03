@@ -13,7 +13,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{CevaTarget, MAX_TARGET_INPUT_SIZE};
+use super::CevaTarget;
 
 pub struct CevaEmuHarness<'a> {
     qemu: &'a Qemu,
@@ -37,6 +37,7 @@ pub struct CevaEmuHarness<'a> {
     pub bd_engine: BDEngine,
     entry_point_spec: String,
     target: Option<Box<dyn CevaTarget>>,
+    max_target_input_size: usize,
 }
 
 impl<'a> CevaEmuHarness<'a> {
@@ -44,6 +45,7 @@ impl<'a> CevaEmuHarness<'a> {
         qemu: &'a Qemu,
         entry_point_spec: String,
         target: Box<dyn CevaTarget>,
+        max_target_input_size: usize,
     ) -> Result<CevaEmuHarness<'a>, Error> {
         let mut elf_buffer = Vec::new();
         let elf =
@@ -98,6 +100,7 @@ impl<'a> CevaEmuHarness<'a> {
             bd_engine,
             entry_point_spec,
             target: Some(target),
+            max_target_input_size,
         })
     }
 
@@ -212,9 +215,9 @@ impl<'a> CevaEmuHarness<'a> {
 
         let original_len = buf.len();
         let mut len = buf.len() as GuestReg;
-        if len > MAX_TARGET_INPUT_SIZE as GuestReg {
-            buf = &buf[0..MAX_TARGET_INPUT_SIZE];
-            len = MAX_TARGET_INPUT_SIZE as GuestReg;
+        if len > self.max_target_input_size as GuestReg {
+            buf = &buf[0..self.max_target_input_size];
+            len = self.max_target_input_size as GuestReg;
         }
         let truncated = original_len != buf.len();
 

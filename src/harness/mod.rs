@@ -17,8 +17,8 @@ pub use ceva_emu::CevaEmuHarness;
 pub use ceva_target::{CevaTarget, CevaTargetKind};
 pub use standard::Harness;
 
-pub const MAX_INPUT_SIZE: usize = 1_048_576;
-pub const MAX_TARGET_INPUT_SIZE: usize = 307_200;
+pub const DEFAULT_MAX_INPUT_SIZE: usize = 1_048_576;
+pub const DEFAULT_MAX_TARGET_INPUT_SIZE: usize = 307_200;
 pub const FILE_PATH_SIZE: usize = 1024;
 pub const G_MMAP_FILE_SIZE: usize = 280;
 

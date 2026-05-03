@@ -16,7 +16,7 @@ use std::{
     time::{Duration, Instant},
 };
 
-use super::{FILE_PATH_SIZE, G_MMAP_FILE_SIZE, MAX_INPUT_SIZE, MAX_TARGET_INPUT_SIZE};
+use super::{FILE_PATH_SIZE, G_MMAP_FILE_SIZE};
 
 const SCAN_FILE_CORE_SET_CALL_OFFSET: GuestAddr = 0x7c;
 const SCAN_FILE_AFTER_CORE_SET_OFFSET: GuestAddr = 0x7e;
@@ -24,6 +24,8 @@ const SCAN_FILE_AFTER_CORE_SET_OFFSET: GuestAddr = 0x7e;
 pub struct Harness<'a> {
     qemu: &'a Qemu,
     pub input_addr: GuestAddr,
+    pub max_input_size: usize,
+    pub max_target_input_size: usize,
     pub file_path: GuestAddr,
     pub g_mmap_file_addr: GuestAddr,
     pub pc: GuestAddr,
@@ -38,7 +40,11 @@ pub struct Harness<'a> {
 }
 
 impl<'a> Harness<'a> {
-    pub fn new(qemu: &'a Qemu) -> Result<Harness<'a>, Error> {
+    pub fn new(
+        qemu: &'a Qemu,
+        max_input_size: usize,
+        max_target_input_size: usize,
+    ) -> Result<Harness<'a>, Error> {
         let mut elf_buffer = Vec::new();
         let elf = EasyElf::from_file(qemu.binary_path(), &mut elf_buffer).unwrap();
 
@@ -53,7 +59,7 @@ impl<'a> Harness<'a> {
         println!("g_mmap_file @ {g_mmap_file_ptr:#x}");
 
         let input_addr = qemu
-            .map_private(0, MAX_INPUT_SIZE, MmapPerms::ReadWrite)
+            .map_private(0, max_input_size, MmapPerms::ReadWrite)
             .map_err(|e| Error::unknown(format!("Failed to map input buffer: {e:}")))?;
         println!("Input buffer @ {input_addr:#x}");
 
@@ -92,6 +98,8 @@ impl<'a> Harness<'a> {
         Ok(Harness {
             qemu,
             input_addr,
+            max_input_size,
+            max_target_input_size,
             file_path,
             g_mmap_file_addr: g_mmap_file_ptr,
             pc: 0,
@@ -112,7 +120,7 @@ impl<'a> Harness<'a> {
         let g_mmap_file_addr = self.g_mmap_file_addr as u64;
 
         vec![
-            input_addr..(input_addr + MAX_INPUT_SIZE as u64),
+            input_addr..(input_addr + self.max_input_size as u64),
             file_path..(file_path + FILE_PATH_SIZE as u64),
             g_mmap_file_addr..(g_mmap_file_addr + G_MMAP_FILE_SIZE as u64),
         ]
@@ -256,9 +264,10 @@ impl<'a> Harness<'a> {
 
         let original_len = buf.len();
         let mut len = buf.len() as GuestReg;
-        if len > MAX_TARGET_INPUT_SIZE as GuestReg {
-            buf = &buf[0..MAX_TARGET_INPUT_SIZE];
-            len = MAX_TARGET_INPUT_SIZE as GuestReg;
+        let max_run_input_size = self.max_target_input_size.min(self.max_input_size);
+        if len > max_run_input_size as GuestReg {
+            buf = &buf[0..max_run_input_size];
+            len = max_run_input_size as GuestReg;
         }
         let truncated = original_len != buf.len();
 
