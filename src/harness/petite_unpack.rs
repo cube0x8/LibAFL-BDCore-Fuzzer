@@ -130,16 +130,66 @@ impl CevaTarget for Petite2000Target {
 
         harness.qemu().remove_breakpoint(after_second_stage_read);
 
-        harness.pc = harness.qemu().read_reg(Regs::Pc).unwrap().try_into().unwrap();
-        harness.stack_ptr = harness.qemu().read_reg(Regs::Sp).unwrap().try_into().unwrap();
-        harness.rbx = harness.qemu().read_reg(Regs::Rbx).unwrap().try_into().unwrap();
-        harness.rbp = harness.qemu().read_reg(Regs::Rbp).unwrap().try_into().unwrap();
-        harness.rdi = harness.qemu().read_reg(Regs::Rdi).unwrap().try_into().unwrap();
-        harness.rsi = harness.qemu().read_reg(Regs::Rsi).unwrap().try_into().unwrap();
-        harness.r12 = harness.qemu().read_reg(Regs::R12).unwrap().try_into().unwrap();
-        harness.r13 = harness.qemu().read_reg(Regs::R13).unwrap().try_into().unwrap();
-        harness.r14 = harness.qemu().read_reg(Regs::R14).unwrap().try_into().unwrap();
-        harness.r15 = harness.qemu().read_reg(Regs::R15).unwrap().try_into().unwrap();
+        harness.pc = harness
+            .qemu()
+            .read_reg(Regs::Pc)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        harness.stack_ptr = harness
+            .qemu()
+            .read_reg(Regs::Sp)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        harness.rbx = harness
+            .qemu()
+            .read_reg(Regs::Rbx)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        harness.rbp = harness
+            .qemu()
+            .read_reg(Regs::Rbp)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        harness.rdi = harness
+            .qemu()
+            .read_reg(Regs::Rdi)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        harness.rsi = harness
+            .qemu()
+            .read_reg(Regs::Rsi)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        harness.r12 = harness
+            .qemu()
+            .read_reg(Regs::R12)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        harness.r13 = harness
+            .qemu()
+            .read_reg(Regs::R13)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        harness.r14 = harness
+            .qemu()
+            .read_reg(Regs::R14)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        harness.r15 = harness
+            .qemu()
+            .read_reg(Regs::R15)
+            .unwrap()
+            .try_into()
+            .unwrap();
 
         log::debug!(
             "Petite2000 init: reached post-read breakpoint at pc={:#x} second_stage_buf={:#x}",

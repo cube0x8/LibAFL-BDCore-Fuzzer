@@ -148,8 +148,8 @@ impl<'a> Client<'a> {
             + EventReceiver<BytesInput, ClientState>,
     {
         let is_cmplog = self.options.is_cmplog_core(client_description.core_id());
-        let is_asan =
-            self.options.use_asan_module() && self.options.is_asan_core(client_description.core_id());
+        let is_asan = self.options.use_asan_module()
+            && self.options.is_asan_core(client_description.core_id());
 
         let interval_snapshot_filters: IntervalSnapshotFilters =
             IntervalSnapshotFilters::from(vec![IntervalSnapshotFilter::ZeroList(
@@ -203,7 +203,9 @@ impl<'a> Client<'a> {
                         state,
                     )
                 } else {
-                    instance.build().run(tuple_list!(snapshot_module, cmplog,), state)
+                    instance
+                        .build()
+                        .run(tuple_list!(snapshot_module, cmplog,), state)
                 }
             }
         } else if self.options.rerun_input.is_some() && self.options.drcov.is_some() {

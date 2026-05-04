@@ -4,7 +4,6 @@ use std::{
     sync::Arc,
     time::{Duration, Instant},
 };
-
 use libafl::{
     corpus::{Corpus, CorpusId, InMemoryCorpus, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::{
@@ -48,9 +47,7 @@ use libafl_qemu::{
     Emulator, Qemu, QemuExecutor,
 };
 
-use libafl_pe_mutator::{
-    BytesToPeMutator, PeMutator, PeMutatorOptions, SectionBodyMutator,
-};
+use libafl_pe_mutator::{BytesToPeMutator, PeMutator, PeMutatorOptions, SectionBodyMutator};
 use libafl_targets::{edges_map_mut_ptr, EDGES_MAP_DEFAULT_SIZE, MAX_EDGES_FOUND};
 use pe_mutator_core::{
     PeMutationCategory, PeMutationCategorySet, PeMutationKind, PeMutationSet, PeMutatorConfig,
@@ -489,27 +486,26 @@ where
                 I2SRandReplace::new()
             )));
 
-            let power_mutator = if self.options.section_body_mutator {
-                BDCoreMutator::PeSectionBody(pe_section_body_mutator_from_options(self.options))
-            } else if self.options.pe_mutator {
+            let power_mutator = if self.options.pe_mutator {
                 BDCoreMutator::Pe(pe_mutator_from_options(self.options))
+            } else if self.options.beria_vm {
+                BDCoreMutator::Beria(crate::mutator::BeriaWorkbufMutator::default())
+            } else if self.options.fixed_size_mutations {
+                BDCoreMutator::MoptFixed(StdMOptMutator::new(
+                    &mut state,
+                    havoc_fixed_size_mutations(),
+                    7,
+                    5,
+                )?)
             } else {
-                if self.options.fixed_size_mutations {
-                    BDCoreMutator::MoptFixed(StdMOptMutator::new(
-                        &mut state,
-                        havoc_fixed_size_mutations(),
-                        7,
-                        5,
-                    )?)
-                } else {
-                    BDCoreMutator::Mopt(StdMOptMutator::new(
-                        &mut state,
-                        libafl::mutators::havoc_mutations(),
-                        7,
-                        5,
-                    )?)
-                }
+                BDCoreMutator::Mopt(StdMOptMutator::new(
+                    &mut state,
+                    libafl::mutators::havoc_mutations(),
+                    7,
+                    5,
+                )?)
             };
+
             let power: StdPowerMutationalStage<_, _, BytesInput, _, _, _> =
                 StdPowerMutationalStage::new(power_mutator);
 
@@ -567,7 +563,9 @@ where
                     }
                 }
             } else {
-                let mutator = if self.options.fixed_size_mutations {
+                let mutator = if self.options.beria_vm {
+                    BDCoreMutator::Beria(crate::mutator::BeriaWorkbufMutator::default())
+                } else if self.options.fixed_size_mutations {
                     BDCoreMutator::MoptFixed(StdMOptMutator::new(
                         &mut state,
                         havoc_fixed_size_mutations(),

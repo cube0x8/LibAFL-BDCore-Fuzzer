@@ -11,7 +11,8 @@ const DEBUG_CODE_BYTES_LEN: usize = 16;
 const DEBUG_INPUT_BYTES_LEN: usize = 32;
 
 fn format_bytes(bytes: &[u8]) -> String {
-    bytes.iter()
+    bytes
+        .iter()
         .map(|byte| format!("{byte:02x}"))
         .collect::<Vec<_>>()
         .join(" ")
@@ -33,18 +34,41 @@ impl CevaTarget for DecodeExecuteColdPath {
         harness.qemu().remove_breakpoint(entry_point);
 
         let max_bp_hit_count = max_bp_hit_count.ok_or_else(|| {
-            Error::illegal_argument(
-                "DecodeExecuteColdPath requires a max breakpoint hit count",
-            )
+            Error::illegal_argument("DecodeExecuteColdPath requires a max breakpoint hit count")
         })?;
         let target_bp_hit_count = rand::thread_rng().gen_range(1..max_bp_hit_count);
         let mut bp_hit_count = 1_u64;
 
-        let initial_pc: GuestAddr = harness.qemu().read_reg(Regs::Pc).unwrap().try_into().unwrap();
-        let initial_sp: GuestAddr = harness.qemu().read_reg(Regs::Sp).unwrap().try_into().unwrap();
-        let initial_rbx: GuestAddr = harness.qemu().read_reg(Regs::Rbx).unwrap().try_into().unwrap();
-        let initial_rdi: GuestAddr = harness.qemu().read_reg(Regs::Rdi).unwrap().try_into().unwrap();
-        let initial_rsi: GuestAddr = harness.qemu().read_reg(Regs::Rsi).unwrap().try_into().unwrap();
+        let initial_pc: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Pc)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let initial_sp: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Sp)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let initial_rbx: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Rbx)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let initial_rdi: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Rdi)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let initial_rsi: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Rsi)
+            .unwrap()
+            .try_into()
+            .unwrap();
         let mut initial_bytes = [0_u8; DEBUG_CODE_BYTES_LEN];
         let _ = harness.qemu().read_mem(entry_point, &mut initial_bytes);
 
@@ -71,7 +95,12 @@ impl CevaTarget for DecodeExecuteColdPath {
             };
             harness.qemu().remove_breakpoint(exit_point);
 
-            let exit_pc: GuestAddr = harness.qemu().read_reg(Regs::Pc).unwrap().try_into().unwrap();
+            let exit_pc: GuestAddr = harness
+                .qemu()
+                .read_reg(Regs::Pc)
+                .unwrap()
+                .try_into()
+                .unwrap();
             log::debug!(
                 "DecodeExecuteColdPath init loop: reached exit_point breakpoint at pc={exit_pc:#x}, rearming entry_point={entry_point:#x}"
             );
@@ -83,14 +112,38 @@ impl CevaTarget for DecodeExecuteColdPath {
 
             harness.qemu().remove_breakpoint(entry_point);
 
-            let loop_pc: GuestAddr = harness.qemu().read_reg(Regs::Pc).unwrap().try_into().unwrap();
-            let loop_sp: GuestAddr = harness.qemu().read_reg(Regs::Sp).unwrap().try_into().unwrap();
-            let loop_rbx: GuestAddr = harness.qemu().read_reg(Regs::Rbx).unwrap().try_into().unwrap();
-            let loop_rdi: GuestAddr = harness.qemu().read_reg(Regs::Rdi).unwrap().try_into().unwrap();
-            let loop_rsi: GuestAddr = harness.qemu().read_reg(Regs::Rsi).unwrap().try_into().unwrap();
+            let loop_pc: GuestAddr = harness
+                .qemu()
+                .read_reg(Regs::Pc)
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let loop_sp: GuestAddr = harness
+                .qemu()
+                .read_reg(Regs::Sp)
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let loop_rbx: GuestAddr = harness
+                .qemu()
+                .read_reg(Regs::Rbx)
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let loop_rdi: GuestAddr = harness
+                .qemu()
+                .read_reg(Regs::Rdi)
+                .unwrap()
+                .try_into()
+                .unwrap();
+            let loop_rsi: GuestAddr = harness
+                .qemu()
+                .read_reg(Regs::Rsi)
+                .unwrap()
+                .try_into()
+                .unwrap();
             let mut loop_bytes = [0_u8; DEBUG_CODE_BYTES_LEN];
             let _ = harness.qemu().read_mem(entry_point, &mut loop_bytes);
-
 
             bp_hit_count += 1;
 
@@ -101,7 +154,12 @@ impl CevaTarget for DecodeExecuteColdPath {
             );
         }
 
-        let current_pc: GuestAddr = harness.qemu().read_reg(Regs::Pc).unwrap().try_into().unwrap();
+        let current_pc: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Pc)
+            .unwrap()
+            .try_into()
+            .unwrap();
         let after_fetch_span_inited = current_pc + 0x4c;
         log::debug!(
             "DecodeExecuteColdPath init: loop finished at hit_count={} pc={current_pc:#x}; setting after_fetch_span_inited breakpoint at {after_fetch_span_inited:#x}",
@@ -113,11 +171,36 @@ impl CevaTarget for DecodeExecuteColdPath {
             let _ = harness.qemu().run();
         };
 
-        let final_pc: GuestAddr = harness.qemu().read_reg(Regs::Pc).unwrap().try_into().unwrap();
-        let final_sp: GuestAddr = harness.qemu().read_reg(Regs::Sp).unwrap().try_into().unwrap();
-        let final_rbx: GuestAddr = harness.qemu().read_reg(Regs::Rbx).unwrap().try_into().unwrap();
-        let final_rdi: GuestAddr = harness.qemu().read_reg(Regs::Rdi).unwrap().try_into().unwrap();
-        let final_rsi: GuestAddr = harness.qemu().read_reg(Regs::Rsi).unwrap().try_into().unwrap();
+        let final_pc: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Pc)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let final_sp: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Sp)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let final_rbx: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Rbx)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let final_rdi: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Rdi)
+            .unwrap()
+            .try_into()
+            .unwrap();
+        let final_rsi: GuestAddr = harness
+            .qemu()
+            .read_reg(Regs::Rsi)
+            .unwrap()
+            .try_into()
+            .unwrap();
         let mut final_bytes = [0_u8; DEBUG_CODE_BYTES_LEN];
         let _ = harness.qemu().read_mem(final_pc, &mut final_bytes);
         log::debug!(
@@ -130,23 +213,22 @@ impl CevaTarget for DecodeExecuteColdPath {
         Ok(())
     }
 
-    fn prepare_input(
-        &self,
-        qemu: &Qemu,
-        input: &[u8],
-        input_len: GuestReg,
-    ) -> Result<(), Error> {
+    fn prepare_input(&self, qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
         let emulator_obj: GuestAddr = qemu.read_reg(Regs::Rbx).unwrap().try_into().unwrap();
 
         // get the host_start pointer of the fetchSpan obj
         let mut host_start_addr = [0u8; 8];
         let _ = qemu.read_mem(emulator_obj + 0x1E8, &mut host_start_addr);
-        let host_start: GuestAddr = u64::from_le_bytes(host_start_addr.try_into().unwrap()).try_into().unwrap();
+        let host_start: GuestAddr = u64::from_le_bytes(host_start_addr.try_into().unwrap())
+            .try_into()
+            .unwrap();
 
         // get the host_end pointer
         let mut host_end_addr = [0u8; 8];
         let _ = qemu.read_mem(emulator_obj + 0x1F0, &mut host_end_addr);
-        let host_end: GuestAddr = u64::from_le_bytes(host_end_addr.try_into().unwrap()).try_into().unwrap();
+        let host_end: GuestAddr = u64::from_le_bytes(host_end_addr.try_into().unwrap())
+            .try_into()
+            .unwrap();
 
         let assembly_block_size: GuestAddr = host_end - host_start;
 
@@ -179,13 +261,9 @@ impl CevaTarget for DecodeExecuteColdPath {
             format_bytes(&after_write[..after_write.len().min(DEBUG_INPUT_BYTES_LEN)]),
         );
         Ok(())
-
     }
 
-    fn reset(
-        &self,
-        harness: &CevaEmuHarness<'_>,
-    ) -> Result<(), Error> {
+    fn reset(&self, harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
         let qemu = harness.qemu();
 
         qemu.write_reg(Regs::Rdi, GuestReg::try_from(harness.rdi).unwrap())
