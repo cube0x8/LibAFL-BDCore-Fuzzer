@@ -181,7 +181,9 @@ where
             return Ok(MutationResult::Skipped);
         }
 
-        if !in_bounds(bytes, BERIA_PATCH_V8_OFF + 0x10, 1) || !in_bounds(bytes, BERIA_PATCH_V12_OFF, 4) {
+        if !in_bounds(bytes, BERIA_PATCH_V8_OFF + 0x10, 1)
+            || !in_bounds(bytes, BERIA_PATCH_V12_OFF, 4)
+        {
             return Ok(MutationResult::Skipped);
         }
 
@@ -227,8 +229,16 @@ where
                     BERIA_IMAGE_BASE
                         .wrapping_add(choose_u32(state, &[0, 0x40, 0x80, 0x120, 0x200])),
                 );
-                write_u32_le(bytes, BERIA_PATCH_V12_OFF, choose_u32(state, &[0, 0, 0, 1, 2, 4]));
-                write_u32_le(bytes, BERIA_PATCH_V8_OFF + 0x00, choose_u32(state, &[1, 1, 1, 2, 3]));
+                write_u32_le(
+                    bytes,
+                    BERIA_PATCH_V12_OFF,
+                    choose_u32(state, &[0, 0, 0, 1, 2, 4]),
+                );
+                write_u32_le(
+                    bytes,
+                    BERIA_PATCH_V8_OFF + 0x00,
+                    choose_u32(state, &[1, 1, 1, 2, 3]),
+                );
             }
 
             // Anchor dword -> v7
@@ -290,7 +300,12 @@ where
 
             // Phase-1 count at v12
             5 => {
-                self.mutate_dword(state, bytes, BERIA_PATCH_V12_OFF, &[0, 0, 0, 1, 2, 4, 8, 0x10, 0x20]);
+                self.mutate_dword(
+                    state,
+                    bytes,
+                    BERIA_PATCH_V12_OFF,
+                    &[0, 0, 0, 1, 2, 4, 8, 0x10, 0x20],
+                );
             }
 
             // Second-phase count
@@ -328,7 +343,12 @@ where
 
             // flags
             9 => {
-                self.mutate_dword(state, bytes, BERIA_PATCH_V8_OFF + 0x0c, &[0, 1, 2, 0xff, 0xffffffff]);
+                self.mutate_dword(
+                    state,
+                    bytes,
+                    BERIA_PATCH_V8_OFF + 0x0c,
+                    &[0, 1, 2, 0xff, 0xffffffff],
+                );
             }
 
             // payload bytes at v8 + 0x10

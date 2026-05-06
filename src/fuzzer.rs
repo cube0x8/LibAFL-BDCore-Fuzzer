@@ -6,7 +6,7 @@ use std::{
     fs::{self, File, OpenOptions},
     io::{self, Write},
     path::PathBuf,
-    sync::Arc,
+    sync::{Arc, Mutex},
 };
 
 use clap::Parser;
@@ -33,6 +33,7 @@ use libafl_bolts::shmem::{ShMemProvider, StdShMemProvider};
 use std::os::unix::io::{AsRawFd, FromRawFd};
 
 use crate::{
+    bitdefender::BDModule,
     client::Client,
     harness::{AnyHarness, CevaEmuHarness, CevaTargetKind, FuzzHarness, Harness},
     options::FuzzerOptions,
@@ -245,6 +246,18 @@ impl Fuzzer {
             .options
             .scan_profile_every()
             .map(|report_every| Arc::new(ScanProfile::new(report_every)));
+        let asan_known_modules = self
+            .options
+            .use_asan_module()
+            .then(|| Arc::new(Mutex::new(Vec::<BDModule>::new())));
+        let mut preinitialized_asan_module = if let Some(known_modules) = &asan_known_modules {
+            let mut asan_module =
+                Client::build_preinitialized_asan_module(&self.options, known_modules.clone())?;
+            asan_module.install_pre_run_tracking();
+            Some(asan_module)
+        } else {
+            None
+        };
 
         let harness = if self.options.translate_node_link
             || self.options.decode_execute_cold_path
@@ -283,6 +296,10 @@ impl Fuzzer {
                 self.options.bitdefender_modules.clone(),
                 self.options.max_bp_hit_count,
             )?;
+            if let Some(known_modules) = &asan_known_modules {
+                *known_modules.lock().expect("ASAN module list mutex poisoned") =
+                    harness.bd_engine.modules.clone();
+            }
             AnyHarness::CevaEmu(harness)
         } else {
             let mut harness = Harness::new(
@@ -294,6 +311,10 @@ impl Fuzzer {
                 self.options.bitdefender_modules.clone(),
                 self.options.exit_points.clone(),
             )?;
+            if let Some(known_modules) = &asan_known_modules {
+                *known_modules.lock().expect("ASAN module list mutex poisoned") =
+                    harness.bd_engine.modules.clone();
+            }
             AnyHarness::Standard(harness)
         };
 
@@ -304,6 +325,7 @@ impl Fuzzer {
             .qemu(&qemu)
             .harness(&harness as &dyn FuzzHarness)
             .scan_profile(scan_profile)
+            .preinitialized_asan_module(preinitialized_asan_module.take())
             .build();
 
         let broker_port = self

@@ -36,7 +36,7 @@ fn write_to_asan_log_file(error_msg: &str, crash_log: &str) {
         .open(PathBuf::from(crash_log))
     {
         let pid = std::process::id();
-        let new_error_msg = format!("PID {} - {}", pid, error_msg);
+        let new_error_msg = format!("PID {} - {}\n", pid, error_msg);
         if let Err(e) = file.write_all(new_error_msg.as_bytes()) {
             eprintln!("Error writing to file: {}", e);
         }
@@ -50,7 +50,7 @@ pub fn log_asan_error_msg(error_msg: String, crash_log: &Option<String>) {
             write_to_asan_log_file(&error_msg, &log);
         }
         None => {
-            println!("ASAN_ERROR: {}", error_msg);
+            println!("ASAN_ERROR:\n{}", error_msg);
         }
     }
 }

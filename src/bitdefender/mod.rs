@@ -12,6 +12,14 @@ pub struct BDModule {
     pub size: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct BDModuleHit {
+    pub name: String,
+    pub start_addr: u64,
+    pub size: u64,
+    pub offset: u64,
+}
+
 pub struct BDEngine {
     pub modules: Vec<BDModule>,
     pub modules_to_instrument: Option<RangeMap<u64, (u16, String)>>,
@@ -31,6 +39,31 @@ impl fmt::Display for BDModule {
             self.start_addr + self.size
         )
     }
+}
+
+impl fmt::Display for BDModuleHit {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}:+{:#x} ({:#x}-{:#x})",
+            self.name,
+            self.offset,
+            self.start_addr,
+            self.start_addr + self.size
+        )
+    }
+}
+
+pub fn module_for_addr(modules: &[BDModule], addr: u64) -> Option<BDModuleHit> {
+    modules
+        .iter()
+        .find(|module| addr >= module.start_addr && addr < module.start_addr + module.size)
+        .map(|module| BDModuleHit {
+            name: module.name.clone(),
+            start_addr: module.start_addr,
+            size: module.size,
+            offset: addr - module.start_addr,
+        })
 }
 
 impl BDEngine {
@@ -65,6 +98,10 @@ impl BDEngine {
             }
         }
         None
+    }
+
+    pub fn module_for_addr(&self, addr: u64) -> Option<BDModuleHit> {
+        module_for_addr(&self.modules, addr)
     }
 
     pub fn core_initialization(&mut self, qemu: &Qemu) {

@@ -1,9 +1,4 @@
 use core::{fmt::Debug, ptr::addr_of_mut};
-use std::{
-    fs, process,
-    sync::Arc,
-    time::{Duration, Instant},
-};
 use libafl::{
     corpus::{Corpus, CorpusId, InMemoryCorpus, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::{
@@ -45,6 +40,11 @@ use libafl_qemu::{
         DrCovModule, EmulatorModuleTuple, StdEdgeCoverageModule,
     },
     Emulator, Qemu, QemuExecutor,
+};
+use std::{
+    fs, process,
+    sync::Arc,
+    time::{Duration, Instant},
 };
 
 use libafl_pe_mutator::{BytesToPeMutator, PeMutator, PeMutatorOptions, SectionBodyMutator};
