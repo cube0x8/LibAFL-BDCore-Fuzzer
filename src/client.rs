@@ -13,7 +13,7 @@ use libafl_bolts::{rands::StdRand, tuples::tuple_list};
 use libafl_qemu::{
     modules::{
         asan_host::AsanError,
-        asan_host::{AsanErrorCallback, AsanTargetCrash},
+        asan_host::{AsanErrorAction, AsanErrorCallback, AsanTargetCrash},
         cmplog::CmpLogModule,
         snapshot::{IntervalSnapshotFilter, IntervalSnapshotFilters, SnapshotModule},
         utils::filters::StdAddressFilter,
@@ -101,7 +101,7 @@ impl<'a> Client<'a> {
             .error_callback(AsanErrorCallback::new(Box::new(move |_rt, _qemu, pc, err| {
                 if skip_pcs.contains(&(pc as u64)) {
                     log::debug!("Skipping ASAN report for configured PC {pc:#x}: {err}");
-                    return;
+                    return AsanErrorAction::Ignore;
                 }
 
                 let pc_module = crate::bitdefender::module_for_addr(&bd_modules, pc as u64);
@@ -161,9 +161,10 @@ impl<'a> Client<'a> {
                             sig,
                             pc
                         );
-                        return;
                     }
                 }
+
+                AsanErrorAction::Report
             })))
             .build())
     }
@@ -253,7 +254,7 @@ impl<'a> Client<'a> {
                 if Self::should_skip_asan_pc(pc as u64, &skip_pc_literals, &skip_pc_specs, &modules)
                 {
                     log::debug!("Skipping ASAN report for configured PC {pc:#x}: {err}");
-                    return;
+                    return AsanErrorAction::Ignore;
                 }
 
                 let pc_module = module_for_addr(&modules, pc as u64);
@@ -316,6 +317,8 @@ impl<'a> Client<'a> {
                         );
                     }
                 }
+
+                AsanErrorAction::Report
             })))
             .build())
     }
