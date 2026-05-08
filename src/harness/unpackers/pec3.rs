@@ -1,14 +1,16 @@
+use std::cell::Cell;
+
 use libafl::Error;
 use libafl_qemu::{GuestAddr, GuestReg, Qemu, Regs};
 
+use crate::harness::unpackers::stream::StagedReadStream;
 use crate::harness::{CevaEmuHarness, CevaTarget};
 
 const DEBUG_INPUT_BYTES_LEN: usize = 32;
-const PEC3_POST_READ40_OFFSET: GuestAddr = 0xBC;
-const PEC3_POST_READ28_OFFSET: GuestAddr = 0x1A9;
 const PEC3_STAGE40_LEN: usize = 0x40;
 const PEC3_STAGE28_LEN: usize = 0x28;
-const PEC3_STAGE_STACK_OFFSET: GuestAddr = 0x110;
+const PEC3_SEEK_THUNK_OFFSET: GuestAddr = 0x2C00;
+const PEC3_READ_THUNK_OFFSET: GuestAddr = 0x2C10;
 
 fn format_bytes(bytes: &[u8]) -> String {
     bytes
@@ -51,88 +53,36 @@ fn restore_nonvolatile_regs(harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
     Ok(())
 }
 
-fn prepare_fixed_buffer_input(
-    qemu: &Qemu,
-    buffer_addr: GuestAddr,
-    stage_len: usize,
+fn initialize_worker_stream_stage(
+    harness: &mut CevaEmuHarness<'_>,
+    seek_pc: GuestAddr,
+    read_pc: GuestAddr,
     target_name: &str,
-    input: &[u8],
-    input_len: GuestReg,
 ) -> Result<(), Error> {
-    let final_input_len: usize = stage_len.min(input_len as usize);
-    let input_buf = &input[..final_input_len];
+    harness.qemu().set_breakpoint(seek_pc);
+    harness.qemu().set_breakpoint(read_pc);
 
-    let mut before_write = vec![0u8; final_input_len];
-    let _ = qemu.read_mem(buffer_addr, &mut before_write);
     log::debug!(
-        "{target_name} prepare_input: buf={buffer_addr:#x} stage_len={stage_len:#x} input_len={} final_input_len={}",
-        input.len(),
-        final_input_len,
-    );
-    log::debug!(
-        "{target_name} prepare_input: input_before_write=[{}] guest_before_write=[{}]",
-        format_bytes(&input_buf[..input_buf.len().min(DEBUG_INPUT_BYTES_LEN)]),
-        format_bytes(&before_write[..before_write.len().min(DEBUG_INPUT_BYTES_LEN)]),
+        "{target_name} init: worker={:#x} seek_hook={seek_pc:#x} read_hook={read_pc:#x}",
+        harness.entry_point,
     );
 
-    qemu.write_mem(buffer_addr, input_buf)
-        .map_err(|e| Error::unknown(format!("Failed to write {target_name} buffer: {e:?}")))?;
-
-    let mut after_write = vec![0u8; final_input_len];
-    let _ = qemu.read_mem(buffer_addr, &mut after_write);
-    log::debug!(
-        "{target_name} prepare_input: guest_after_write=[{}]",
-        format_bytes(&after_write[..after_write.len().min(DEBUG_INPUT_BYTES_LEN)]),
-    );
     Ok(())
 }
 
-fn initialize_post_read_stage(
-    harness: &mut CevaEmuHarness<'_>,
-    post_read_offset: GuestAddr,
-    target_name: &str,
-) -> Result<(), Error> {
-    let current_pc: GuestAddr = harness
-        .qemu()
-        .read_reg(Regs::Pc)
-        .unwrap()
-        .try_into()
-        .unwrap();
+fn read_entry_stub_prefix(qemu: &Qemu, want_len: usize) -> Result<Vec<u8>, Error> {
+    let a4: GuestAddr = qemu.read_reg(Regs::R9).unwrap().try_into().unwrap();
+    let rsp: GuestAddr = qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
+    let a5 = read_stack_arg_u64(qemu, rsp, 0x28)? as usize;
 
-    let entry_point = harness.entry_point;
-    harness.qemu().remove_breakpoint(entry_point);
-
-    let post_read_pc = current_pc + post_read_offset;
-    harness.qemu().set_breakpoint(post_read_pc);
-
-    log::debug!(
-        "{target_name} init: current_pc={current_pc:#x} setting post-read breakpoint at {post_read_pc:#x}"
-    );
-
-    unsafe {
-        let _ = harness.qemu().run();
-    };
-
-    harness.qemu().remove_breakpoint(post_read_pc);
-
-    let final_pc: GuestAddr = harness
-        .qemu()
-        .read_reg(Regs::Pc)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let rbp: GuestAddr = harness
-        .qemu()
-        .read_reg(Regs::Rbp)
-        .unwrap()
-        .try_into()
-        .unwrap();
-    let stage_buf = rbp + PEC3_STAGE_STACK_OFFSET;
-    log::debug!(
-        "{target_name} init: reached post-read breakpoint at pc={final_pc:#x} rbp={rbp:#x} stage_buf={stage_buf:#x}"
-    );
-
-    Ok(())
+    let read_len = want_len.min(a5);
+    let mut out = vec![0u8; want_len];
+    if read_len != 0 {
+        qemu.read_mem(a4, &mut out[..read_len]).map_err(|e| {
+            Error::unknown(format!("Failed to read pec3 entry stub prefix: {e:?}"))
+        })?;
+    }
+    Ok(out)
 }
 
 #[derive(Default)]
@@ -182,7 +132,11 @@ impl CevaTarget for Pec3A4Target {
 }
 
 #[derive(Default)]
-pub struct Pec3Read40Target;
+pub struct Pec3Read40Target {
+    seek_pc: Cell<GuestAddr>,
+    read_pc: Cell<GuestAddr>,
+    stream: StagedReadStream,
+}
 
 impl CevaTarget for Pec3Read40Target {
     fn name(&self) -> &'static str {
@@ -194,29 +148,54 @@ impl CevaTarget for Pec3Read40Target {
         harness: &mut CevaEmuHarness<'_>,
         _max_bp_hit_count: Option<u64>,
     ) -> Result<(), Error> {
-        initialize_post_read_stage(harness, PEC3_POST_READ40_OFFSET, self.name())
+        let seek_pc = harness.entry_point + PEC3_SEEK_THUNK_OFFSET;
+        let read_pc = harness.entry_point + PEC3_READ_THUNK_OFFSET;
+
+        self.seek_pc.set(seek_pc);
+        self.read_pc.set(read_pc);
+
+        initialize_worker_stream_stage(harness, seek_pc, read_pc, self.name())
     }
 
     fn prepare_input(&self, qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
-        let rbp: GuestAddr = qemu.read_reg(Regs::Rbp).unwrap().try_into().unwrap();
-        let stage_buf = rbp + PEC3_STAGE_STACK_OFFSET;
-        prepare_fixed_buffer_input(
-            qemu,
-            stage_buf,
-            PEC3_STAGE40_LEN,
-            self.name(),
-            input,
-            input_len,
-        )
+        let final_input_len: usize = PEC3_STAGE40_LEN.min(input_len as usize);
+        let mut stages = Vec::with_capacity(2);
+        stages.push(input[..final_input_len].to_vec());
+        stages.push(read_entry_stub_prefix(qemu, PEC3_STAGE28_LEN)?);
+        self.stream.set_stages(stages);
+        Ok(())
     }
 
     fn reset(&self, harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
-        restore_nonvolatile_regs(harness)
+        restore_nonvolatile_regs(harness)?;
+        self.stream.reset();
+        Ok(())
+    }
+
+    fn handle_breakpoint(&self, harness: &CevaEmuHarness<'_>) -> Result<bool, Error> {
+        let qemu = harness.qemu();
+        let pc: GuestAddr = qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+
+        if pc == self.seek_pc.get() {
+            self.stream.emulate_seek(qemu)?;
+            return Ok(true);
+        }
+
+        if pc == self.read_pc.get() {
+            self.stream.emulate_read(qemu)?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 }
 
 #[derive(Default)]
-pub struct Pec3Read28Target;
+pub struct Pec3Read28Target {
+    seek_pc: Cell<GuestAddr>,
+    read_pc: Cell<GuestAddr>,
+    stream: StagedReadStream,
+}
 
 impl CevaTarget for Pec3Read28Target {
     fn name(&self) -> &'static str {
@@ -228,23 +207,44 @@ impl CevaTarget for Pec3Read28Target {
         harness: &mut CevaEmuHarness<'_>,
         _max_bp_hit_count: Option<u64>,
     ) -> Result<(), Error> {
-        initialize_post_read_stage(harness, PEC3_POST_READ28_OFFSET, self.name())
+        let seek_pc = harness.entry_point + PEC3_SEEK_THUNK_OFFSET;
+        let read_pc = harness.entry_point + PEC3_READ_THUNK_OFFSET;
+
+        self.seek_pc.set(seek_pc);
+        self.read_pc.set(read_pc);
+
+        initialize_worker_stream_stage(harness, seek_pc, read_pc, self.name())
     }
 
     fn prepare_input(&self, qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
-        let rbp: GuestAddr = qemu.read_reg(Regs::Rbp).unwrap().try_into().unwrap();
-        let stage_buf = rbp + PEC3_STAGE_STACK_OFFSET;
-        prepare_fixed_buffer_input(
-            qemu,
-            stage_buf,
-            PEC3_STAGE28_LEN,
-            self.name(),
-            input,
-            input_len,
-        )
+        let final_input_len: usize = PEC3_STAGE28_LEN.min(input_len as usize);
+        let mut stages = Vec::with_capacity(2);
+        stages.push(read_entry_stub_prefix(qemu, PEC3_STAGE40_LEN)?);
+        stages.push(input[..final_input_len].to_vec());
+        self.stream.set_stages(stages);
+        Ok(())
     }
 
     fn reset(&self, harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
-        restore_nonvolatile_regs(harness)
+        restore_nonvolatile_regs(harness)?;
+        self.stream.reset();
+        Ok(())
+    }
+
+    fn handle_breakpoint(&self, harness: &CevaEmuHarness<'_>) -> Result<bool, Error> {
+        let qemu = harness.qemu();
+        let pc: GuestAddr = qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+
+        if pc == self.seek_pc.get() {
+            self.stream.emulate_seek(qemu)?;
+            return Ok(true);
+        }
+
+        if pc == self.read_pc.get() {
+            self.stream.emulate_read(qemu)?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 }

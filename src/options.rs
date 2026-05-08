@@ -291,7 +291,7 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
-        help = "Target petite.xmd after the second-stage 0x2000 read and mutate that filled buffer"
+        help = "Target petite.xmd worker entry and emulate its local seek/read thunks from a staged Rust-backed fake stream"
     )]
     pub petite_2000: bool,
 
@@ -309,13 +309,13 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
-        help = "Target pec3.xmd after the first 0x40 reader-backed read and mutate that filled buffer"
+        help = "Target pec3.xmd worker entry and emulate its local seek/read thunks, fuzzing the first 0x40 returned stage"
     )]
     pub pec3_40: bool,
 
     #[arg(
         long,
-        help = "Target pec3.xmd after the later 0x28 reader-backed read and mutate that filled buffer"
+        help = "Target pec3.xmd worker entry and emulate its local seek/read thunks, fuzzing the later 0x28 returned stage"
     )]
     pub pec3_28: bool,
 

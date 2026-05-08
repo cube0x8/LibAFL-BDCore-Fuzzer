@@ -1,11 +1,15 @@
+use std::cell::Cell;
+
 use libafl::Error;
 use libafl_qemu::{GuestAddr, GuestReg, Qemu, Regs};
 
+use crate::harness::unpackers::stream::StagedReadStream;
 use crate::harness::{CevaEmuHarness, CevaTarget};
 
 const DEBUG_INPUT_BYTES_LEN: usize = 32;
-const PETITE_POST_READ_OFFSET: GuestAddr = 0x737;
-const PETITE_SECOND_STAGE_LEN: usize = 0x2000;
+const PETITE_STAGE2_LEN: usize = 0x2000;
+const PETITE_SEEK_THUNK_OFFSET: GuestAddr = 0xDF8;
+const PETITE_READ_THUNK_OFFSET: GuestAddr = 0xE08;
 
 fn format_bytes(bytes: &[u8]) -> String {
     bytes
@@ -44,6 +48,23 @@ fn restore_nonvolatile_regs(harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
         .map_err(|e| Error::unknown(format!("Failed to restore R14: {e:?}")))?;
     qemu.write_reg(Regs::R15, GuestReg::try_from(harness.r15).unwrap())
         .map_err(|e| Error::unknown(format!("Failed to restore R15: {e:?}")))?;
+
+    Ok(())
+}
+
+fn initialize_worker_stream_stage(
+    harness: &mut CevaEmuHarness<'_>,
+    seek_pc: GuestAddr,
+    read_pc: GuestAddr,
+    target_name: &str,
+) -> Result<(), Error> {
+    harness.qemu().set_breakpoint(seek_pc);
+    harness.qemu().set_breakpoint(read_pc);
+
+    log::debug!(
+        "{target_name} init: worker={:#x} seek_hook={seek_pc:#x} read_hook={read_pc:#x}",
+        harness.entry_point,
+    );
 
     Ok(())
 }
@@ -95,7 +116,11 @@ impl CevaTarget for PetiteA4Target {
 }
 
 #[derive(Default)]
-pub struct Petite2000Target;
+pub struct Petite2000Target {
+    seek_pc: Cell<GuestAddr>,
+    read_pc: Cell<GuestAddr>,
+    stream: StagedReadStream,
+}
 
 impl CevaTarget for Petite2000Target {
     fn name(&self) -> &'static str {
@@ -107,132 +132,42 @@ impl CevaTarget for Petite2000Target {
         harness: &mut CevaEmuHarness<'_>,
         _max_bp_hit_count: Option<u64>,
     ) -> Result<(), Error> {
-        let current_pc: GuestAddr = harness
-            .qemu()
-            .read_reg(Regs::Pc)
-            .unwrap()
-            .try_into()
-            .unwrap();
+        let seek_pc = harness.entry_point + PETITE_SEEK_THUNK_OFFSET;
+        let read_pc = harness.entry_point + PETITE_READ_THUNK_OFFSET;
 
-        let entry_point = harness.entry_point;
-        harness.qemu().remove_breakpoint(entry_point);
+        self.seek_pc.set(seek_pc);
+        self.read_pc.set(read_pc);
 
-        let after_second_stage_read = current_pc + PETITE_POST_READ_OFFSET;
-        harness.qemu().set_breakpoint(after_second_stage_read);
-
-        log::debug!(
-            "Petite2000 init: current_pc={current_pc:#x} setting post-read breakpoint at {after_second_stage_read:#x}"
-        );
-
-        unsafe {
-            let _ = harness.qemu().run();
-        };
-
-        harness.qemu().remove_breakpoint(after_second_stage_read);
-
-        harness.pc = harness
-            .qemu()
-            .read_reg(Regs::Pc)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        harness.stack_ptr = harness
-            .qemu()
-            .read_reg(Regs::Sp)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        harness.rbx = harness
-            .qemu()
-            .read_reg(Regs::Rbx)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        harness.rbp = harness
-            .qemu()
-            .read_reg(Regs::Rbp)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        harness.rdi = harness
-            .qemu()
-            .read_reg(Regs::Rdi)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        harness.rsi = harness
-            .qemu()
-            .read_reg(Regs::Rsi)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        harness.r12 = harness
-            .qemu()
-            .read_reg(Regs::R12)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        harness.r13 = harness
-            .qemu()
-            .read_reg(Regs::R13)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        harness.r14 = harness
-            .qemu()
-            .read_reg(Regs::R14)
-            .unwrap()
-            .try_into()
-            .unwrap();
-        harness.r15 = harness
-            .qemu()
-            .read_reg(Regs::R15)
-            .unwrap()
-            .try_into()
-            .unwrap();
-
-        log::debug!(
-            "Petite2000 init: reached post-read breakpoint at pc={:#x} second_stage_buf={:#x}",
-            harness.pc,
-            harness.rdi,
-        );
-
-        Ok(())
+        initialize_worker_stream_stage(harness, seek_pc, read_pc, self.name())
     }
 
-    fn prepare_input(&self, qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
-        let second_stage_buf: GuestAddr = qemu.read_reg(Regs::Rdi).unwrap().try_into().unwrap();
-        let final_input_len: usize = PETITE_SECOND_STAGE_LEN.min(input_len as usize);
-        let input_buf = &input[..final_input_len];
-
-        let mut before_write = vec![0u8; final_input_len];
-        let _ = qemu.read_mem(second_stage_buf, &mut before_write);
-        log::debug!(
-            "Petite2000 prepare_input: second_stage_buf={second_stage_buf:#x} stage_len={:#x} input_len={} final_input_len={}",
-            PETITE_SECOND_STAGE_LEN,
-            input.len(),
-            final_input_len,
-        );
-        log::debug!(
-            "Petite2000 prepare_input: input_before_write=[{}] guest_before_write=[{}]",
-            format_bytes(&input_buf[..input_buf.len().min(DEBUG_INPUT_BYTES_LEN)]),
-            format_bytes(&before_write[..before_write.len().min(DEBUG_INPUT_BYTES_LEN)]),
-        );
-
-        qemu.write_mem(second_stage_buf, input_buf).map_err(|e| {
-            Error::unknown(format!("Failed to write petite second-stage buffer: {e:?}"))
-        })?;
-
-        let mut after_write = vec![0u8; final_input_len];
-        let _ = qemu.read_mem(second_stage_buf, &mut after_write);
-        log::debug!(
-            "Petite2000 prepare_input: guest_after_write=[{}]",
-            format_bytes(&after_write[..after_write.len().min(DEBUG_INPUT_BYTES_LEN)]),
-        );
+    fn prepare_input(&self, _qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
+        let final_input_len: usize = PETITE_STAGE2_LEN.min(input_len as usize);
+        self.stream
+            .set_stages(vec![input[..final_input_len].to_vec()]);
         Ok(())
     }
 
     fn reset(&self, harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
-        restore_nonvolatile_regs(harness)
+        restore_nonvolatile_regs(harness)?;
+        self.stream.reset();
+        Ok(())
+    }
+
+    fn handle_breakpoint(&self, harness: &CevaEmuHarness<'_>) -> Result<bool, Error> {
+        let qemu = harness.qemu();
+        let pc: GuestAddr = qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+
+        if pc == self.seek_pc.get() {
+            self.stream.emulate_seek(qemu)?;
+            return Ok(true);
+        }
+
+        if pc == self.read_pc.get() {
+            self.stream.emulate_read(qemu)?;
+            return Ok(true);
+        }
+
+        Ok(false)
     }
 }
