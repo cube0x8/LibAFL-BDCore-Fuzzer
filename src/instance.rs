@@ -1,43 +1,40 @@
 use core::{fmt::Debug, ptr::addr_of_mut};
 use libafl::{
-    corpus::{Corpus, CorpusId, InMemoryCorpus, InMemoryOnDiskCorpus, OnDiskCorpus},
+    corpus::{Corpus, CorpusId, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::{
-        ClientDescription, EventFirer, EventReceiver, EventRestarter, NopEventManager,
+        ClientDescription, EventFirer, EventReceiver, EventRestarter,
         ProgressReporter, SendExiting,
     },
     executors::{Executor, ShadowExecutor},
     feedback_or, feedback_or_fast,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     fuzzer::{Evaluator, Fuzzer, StdFuzzer},
-    inputs::{BytesInput, Input},
+    inputs::BytesInput,
     mutators::{
         token_mutations::I2SRandReplace, HavocScheduledMutator, StdMOptMutator,
-        TuneableScheduledMutator,
     },
     observers::{CanTrack, HitcountsMapObserver, TimeObserver, VariableMapObserver},
     schedulers::{
         powersched::PowerSchedule, IndexesLenTimeMinimizerScheduler, PowerQueueScheduler,
-        QueueScheduler,
     },
     stages::{
         calibrate::CalibrationStage, power::StdPowerMutationalStage, ShadowTracingStage,
-        StagesTuple, StdMutationalStage, SyncFromDiskStage, TuneableMutationalStage,
+        StagesTuple, StdMutationalStage, SyncFromDiskStage,
     },
     state::{HasCorpus, StdState},
-    Error, HasMetadata, NopFuzzer,
+    Error, HasMetadata,
 };
 use libafl_bolts::{
     ownedref::OwnedMutSlice,
     rands::StdRand,
-    tuples::{tuple_list, MatchFirstType, Merge, Prepend},
+    tuples::{tuple_list, Prepend},
 };
 use libafl_qemu::{
     modules::{
-        cmplog::{CmpLogModule, CmpLogObserver},
-        edges::EdgeCoverageModule,
+        cmplog::CmpLogObserver,
         snapshot::SnapshotModule,
-        utils::filters::{HasAddressFilter, NopPageFilter, StdAddressFilter},
-        DrCovModule, EmulatorModuleTuple, StdEdgeCoverageModule,
+        utils::filters::StdAddressFilter,
+        EmulatorModuleTuple, StdEdgeCoverageModule,
     },
     Emulator, Qemu, QemuExecutor,
 };
@@ -353,7 +350,7 @@ where
             .address_filter(edge_cov_address_filter)
             .build()?;
 
-        let mut modules = modules.prepend(edge_coverage_module);
+        let modules = modules.prepend(edge_coverage_module);
 
         // Create an observation channel to keep track of the execution time
         let time_observer = TimeObserver::new("time");

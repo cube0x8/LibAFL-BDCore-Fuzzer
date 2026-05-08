@@ -169,9 +169,7 @@ impl<'a> Client<'a> {
             .build())
     }
 
-    fn parse_asan_skip_pc_specs(
-        options: &FuzzerOptions,
-    ) -> Result<(Vec<u64>, Vec<String>), Error> {
+    fn parse_asan_skip_pc_specs(options: &FuzzerOptions) -> Result<(Vec<u64>, Vec<String>), Error> {
         let mut literal_pcs = Vec::new();
         let mut module_specs = Vec::new();
 

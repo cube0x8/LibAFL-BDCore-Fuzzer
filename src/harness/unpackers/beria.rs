@@ -1,7 +1,7 @@
 use libafl::Error;
 use libafl_qemu::{GuestAddr, GuestReg, Qemu, Regs};
 
-use super::{ceva_emu::CevaEmuHarness, ceva_target::CevaTarget};
+use crate::harness::{CevaEmuHarness, CevaTarget};
 
 const DEBUG_INPUT_BYTES_LEN: usize = 32;
 const BERIA_AOEP_ANCHOR_OFF: usize = 0x181248;
@@ -13,6 +13,7 @@ const BERIA_PATCH_V8_OFF: usize = BERIA_PATCH_V12_OFF + 4;
 const BERIA_PATCH_V8_LEN: usize = 0x110;
 const BERIA_PATCH_INPUT_SIZE: usize = BERIA_PATCH_V8_OFF + BERIA_PATCH_V8_LEN;
 
+/*
 fn format_bytes(bytes: &[u8]) -> String {
     bytes
         .iter()
@@ -20,8 +21,9 @@ fn format_bytes(bytes: &[u8]) -> String {
         .collect::<Vec<_>>()
         .join(" ")
 }
+*/
 
-fn restore_nonvolatile_regs(harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
+fn restore_nonvolatile_regs(_harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
     Ok(())
 }
 
@@ -86,9 +88,7 @@ impl CevaTarget for BeriaVmTarget {
                 })
             };
 
-        let aoep = read_u32(qemu, unpack_state + 0x68, "unpack_state->aoep")?;
         let image_base = read_u32(qemu, unpack_state + 0x74, "unpack_state->image_base")?;
-        let e_lfanew = read_u32(qemu, unpack_state + 0x3c, "unpack_state->e_lfanew")?;
 
         if input_buf.len() < BERIA_PATCH_INPUT_SIZE {
             return Err(Error::unknown(format!(
@@ -154,83 +154,6 @@ impl CevaTarget for BeriaVmTarget {
                 work_buf + v8 as GuestAddr
             ))
         })?;
-
-        let anchor_off =
-            aoep.checked_add(0x13d)
-                .ok_or_else(|| Error::unknown("aoep + 0x13d overflow"))? as GuestAddr;
-        let anchor_dword = read_u32(qemu, work_buf + anchor_off, "work_buf[aoep+0x13d]")?;
-        let v7 = anchor_dword.wrapping_sub(image_base);
-
-        let dword_at_v7: Option<u32> = if (v7 as usize) + 4 <= work_size {
-            Some(read_u32(qemu, work_buf + v7 as GuestAddr, "work_buf[v7]")?)
-        } else {
-            None
-        };
-        let dword_at_v7_plus_4 = if (v7 as usize) + 8 <= work_size {
-            Some(read_u32(
-                qemu,
-                work_buf + v7 as GuestAddr + 4,
-                "work_buf[v7+4]",
-            )?)
-        } else {
-            None
-        };
-        let dword_at_v7_plus_c = if (v7 as usize) + 0x10 <= work_size {
-            Some(read_u32(
-                qemu,
-                work_buf + v7 as GuestAddr + 0xc,
-                "work_buf[v7+0xc]",
-            )?)
-        } else {
-            None
-        };
-        let v8 = dword_at_v7.map(|x| x.wrapping_sub(image_base)).unwrap_or(0);
-        let v12 = match (dword_at_v7_plus_4, dword_at_v7_plus_c) {
-            (Some(a), Some(b)) => a.wrapping_sub(b),
-            _ => 0,
-        };
-
-        let dword_at_v8 = if (v8 as usize) + 4 <= work_size {
-            Some(read_u32(qemu, work_buf + v8 as GuestAddr, "work_buf[v8]")?)
-        } else {
-            None
-        };
-        let dword_at_v8_plus_4 = if (v8 as usize) + 8 <= work_size {
-            Some(read_u32(
-                qemu,
-                work_buf + v8 as GuestAddr + 4,
-                "work_buf[v8+4]",
-            )?)
-        } else {
-            None
-        };
-        let dword_at_v8_plus_8 = if (v8 as usize) + 12 <= work_size {
-            Some(read_u32(
-                qemu,
-                work_buf + v8 as GuestAddr + 8,
-                "work_buf[v8+8]",
-            )?)
-        } else {
-            None
-        };
-        let dword_at_v8_plus_c = if (v8 as usize) + 16 <= work_size {
-            Some(read_u32(
-                qemu,
-                work_buf + v8 as GuestAddr + 0xc,
-                "work_buf[v8+0xc]",
-            )?)
-        } else {
-            None
-        };
-        let dword_at_v12 = if (v12 as usize) + 4 <= work_size {
-            Some(read_u32(
-                qemu,
-                work_buf + v12 as GuestAddr,
-                "work_buf[v12]",
-            )?)
-        } else {
-            None
-        };
 
         let mut after_write = vec![0u8; DEBUG_INPUT_BYTES_LEN.min(work_size)];
         let _ = qemu.read_mem(work_buf, &mut after_write);

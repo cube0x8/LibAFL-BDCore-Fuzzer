@@ -1,7 +1,7 @@
 use libafl::Error;
 use libafl_qemu::{GuestAddr, GuestReg, Qemu, Regs};
 
-use super::{ceva_emu::CevaEmuHarness, ceva_target::CevaTarget};
+use crate::harness::{CevaEmuHarness, CevaTarget};
 
 const DEBUG_INPUT_BYTES_LEN: usize = 32;
 const PEC3_POST_READ40_OFFSET: GuestAddr = 0xBC;

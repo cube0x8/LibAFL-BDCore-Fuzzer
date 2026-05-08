@@ -300,8 +300,9 @@ impl Fuzzer {
                 self.options.max_bp_hit_count,
             )?;
             if let Some(known_modules) = &asan_known_modules {
-                *known_modules.lock().expect("ASAN module list mutex poisoned") =
-                    harness.bd_engine.modules.clone();
+                *known_modules
+                    .lock()
+                    .expect("ASAN module list mutex poisoned") = harness.bd_engine.modules.clone();
             }
             AnyHarness::CevaEmu(harness)
         } else {
@@ -315,8 +316,9 @@ impl Fuzzer {
                 self.options.exit_points.clone(),
             )?;
             if let Some(known_modules) = &asan_known_modules {
-                *known_modules.lock().expect("ASAN module list mutex poisoned") =
-                    harness.bd_engine.modules.clone();
+                *known_modules
+                    .lock()
+                    .expect("ASAN module list mutex poisoned") = harness.bd_engine.modules.clone();
             }
             AnyHarness::Standard(harness)
         };

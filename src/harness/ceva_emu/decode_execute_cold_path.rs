@@ -2,7 +2,7 @@ use libafl::Error;
 use libafl_qemu::{GuestAddr, GuestReg, Qemu, Regs};
 use rand::Rng;
 
-use super::{ceva_emu::CevaEmuHarness, ceva_target::CevaTarget};
+use crate::harness::{CevaEmuHarness, CevaTarget};
 
 #[derive(Default)]
 pub struct DecodeExecuteColdPath;

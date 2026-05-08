@@ -3,7 +3,7 @@ use std::cell::{Cell, RefCell};
 use libafl::Error;
 use libafl_qemu::{ArchExtras, GuestAddr, GuestReg, Qemu, Regs};
 
-use super::{ceva_emu::CevaEmuHarness, ceva_target::CevaTarget};
+use crate::harness::{CevaEmuHarness, CevaTarget};
 
 const MORPHINEP_SEEK_THUNK_OFFSET: GuestAddr = 0x658;
 const MORPHINEP_READ_THUNK_OFFSET: GuestAddr = 0x668;
@@ -124,8 +124,9 @@ impl MorphinepTarget {
         let src = &stream.data[stream.pos..end];
 
         if !src.is_empty() {
-            qemu.write_mem(dst, src)
-                .map_err(|e| Error::unknown(format!("Failed to write emulated read buffer: {e:?}")))?;
+            qemu.write_mem(dst, src).map_err(|e| {
+                Error::unknown(format!("Failed to write emulated read buffer: {e:?}"))
+            })?;
         }
 
         stream.pos = end;

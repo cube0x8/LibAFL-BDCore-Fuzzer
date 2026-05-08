@@ -1,6 +1,4 @@
 use flate2::{write::GzEncoder, Compression};
-use libafl_qemu::Emulator;
-use rand::{distributions::Alphanumeric, Rng};
 use std::fs::{rename, File, OpenOptions};
 use std::io::{BufReader, BufWriter, Read, Write};
 use std::path::PathBuf;
@@ -18,7 +16,7 @@ pub fn print_memory<QT, S, E>(emu: &Emulator<QT, S, E>, addr: u64, size: u32) {
         println!("{addr:#x?}: {result}");
     }
 }
-*/
+
 pub fn generate_random_string(length: usize) -> String {
     let s: String = rand::thread_rng()
         .sample_iter(&Alphanumeric)
@@ -28,6 +26,7 @@ pub fn generate_random_string(length: usize) -> String {
 
     s
 }
+*/
 
 fn write_to_asan_log_file(error_msg: &str, crash_log: &str) {
     if let Ok(mut file) = OpenOptions::new()

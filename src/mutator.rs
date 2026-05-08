@@ -18,10 +18,9 @@ use libafl::{
     Error, HasMetadata,
 };
 use libafl_bolts::{
-    HasLen,
     rands::Rand,
     tuples::{tuple_list, tuple_list_type},
-    Named,
+    HasLen, Named,
 };
 use libafl_pe_mutator::PeMutator;
 
@@ -121,10 +120,12 @@ fn choose_usize<S: HasRand>(state: &mut S, values: &[usize]) -> usize {
     values[idx]
 }
 
+/*
 fn choose_u8<S: HasRand>(state: &mut S, values: &[u8]) -> u8 {
     let idx = (state.rand_mut().next() as usize) % values.len();
     values[idx]
 }
+*/
 
 fn ensure_input_len(input: &mut BytesInput, len: usize) {
     if input.len() < len {
@@ -195,7 +196,10 @@ impl MorphinepStreamMutator {
     fn mutate_stage0_payload<S: HasRand>(&self, state: &mut S, input: &mut BytesInput) {
         ensure_input_len(input, MORPHINEP_STAGE0_MIN);
 
-        let stage0_len = input.len().min(MORPHINEP_STAGE0_MAX).max(MORPHINEP_STAGE0_MIN);
+        let stage0_len = input
+            .len()
+            .min(MORPHINEP_STAGE0_MAX)
+            .max(MORPHINEP_STAGE0_MIN);
         let bytes = input.mutator_bytes_mut();
         let rounds = 1 + ((state.rand_mut().next() as usize) % 16);
         for _ in 0..rounds {
@@ -294,11 +298,12 @@ impl MorphinepStreamMutator {
     }
 
     fn mutate_stage0_length<S: HasRand>(&self, state: &mut S, input: &mut BytesInput) {
-        let keep_stage1 =
-            input.len() > MORPHINEP_STAGE0_MAX && (state.rand_mut().next() & 1) == 0;
+        let keep_stage1 = input.len() > MORPHINEP_STAGE0_MAX && (state.rand_mut().next() & 1) == 0;
         let requested_stage0_len = choose_usize(
             state,
-            &[5, 0x20, 0x80, 0x100, 0x200, 0x600, 0x1000, 0x2000, 0x3fff, 0x4000],
+            &[
+                5, 0x20, 0x80, 0x100, 0x200, 0x600, 0x1000, 0x2000, 0x3fff, 0x4000,
+            ],
         )
         .min(MORPHINEP_STAGE0_MAX)
         .max(MORPHINEP_STAGE0_MIN);

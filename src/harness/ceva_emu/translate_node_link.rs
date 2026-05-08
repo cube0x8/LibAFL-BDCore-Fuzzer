@@ -1,7 +1,7 @@
 use libafl::Error;
 use libafl_qemu::{GuestAddr, GuestReg, Qemu, Regs};
 
-use super::ceva_target::CevaTarget;
+use crate::harness::CevaTarget;
 
 #[derive(Default)]
 pub struct TranslateNodeLinkTarget;
