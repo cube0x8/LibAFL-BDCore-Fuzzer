@@ -90,20 +90,20 @@ impl BDEngine {
             size,
         });
     }
-/*
-    pub fn get_module_by_addr(&self, addr: u64) -> Option<&BDModule> {
-        for module in &self.modules {
-            if addr >= module.start_addr && addr < module.start_addr + module.size {
-                return Some(module);
+    /*
+        pub fn get_module_by_addr(&self, addr: u64) -> Option<&BDModule> {
+            for module in &self.modules {
+                if addr >= module.start_addr && addr < module.start_addr + module.size {
+                    return Some(module);
+                }
             }
+            None
         }
-        None
-    }
 
-    pub fn module_for_addr(&self, addr: u64) -> Option<BDModuleHit> {
-        module_for_addr(&self.modules, addr)
-    }
-*/
+        pub fn module_for_addr(&self, addr: u64) -> Option<BDModuleHit> {
+            module_for_addr(&self.modules, addr)
+        }
+    */
     pub fn core_initialization(&mut self, qemu: &Qemu) {
         qemu.set_breakpoint(self.initialize_core_ptr);
 

@@ -2,17 +2,14 @@ use core::{fmt::Debug, ptr::addr_of_mut};
 use libafl::{
     corpus::{Corpus, CorpusId, InMemoryOnDiskCorpus, OnDiskCorpus},
     events::{
-        ClientDescription, EventFirer, EventReceiver, EventRestarter,
-        ProgressReporter, SendExiting,
+        ClientDescription, EventFirer, EventReceiver, EventRestarter, ProgressReporter, SendExiting,
     },
     executors::{Executor, ShadowExecutor},
     feedback_or, feedback_or_fast,
     feedbacks::{CrashFeedback, MaxMapFeedback, TimeFeedback, TimeoutFeedback},
     fuzzer::{Evaluator, Fuzzer, StdFuzzer},
     inputs::BytesInput,
-    mutators::{
-        token_mutations::I2SRandReplace, HavocScheduledMutator, StdMOptMutator,
-    },
+    mutators::{token_mutations::I2SRandReplace, HavocScheduledMutator, StdMOptMutator},
     observers::{CanTrack, HitcountsMapObserver, TimeObserver, VariableMapObserver},
     schedulers::{
         powersched::PowerSchedule, IndexesLenTimeMinimizerScheduler, PowerQueueScheduler,
@@ -31,9 +28,7 @@ use libafl_bolts::{
 };
 use libafl_qemu::{
     modules::{
-        cmplog::CmpLogObserver,
-        snapshot::SnapshotModule,
-        utils::filters::StdAddressFilter,
+        cmplog::CmpLogObserver, snapshot::SnapshotModule, utils::filters::StdAddressFilter,
         EmulatorModuleTuple, StdEdgeCoverageModule,
     },
     Emulator, Qemu, QemuExecutor,
@@ -157,7 +152,9 @@ where
 
 use crate::{
     harness::FuzzHarness,
-    mutator::{havoc_fixed_size_mutations, BDCoreMutator},
+    mutators::{
+        havoc_fixed_size_mutations, BDCoreMutator, BeriaWorkbufMutator, MorphinepStreamMutator,
+    },
     options::FuzzerOptions,
     scan_profile::ScanProfile,
     utils,
@@ -486,9 +483,9 @@ where
             let power_mutator = if self.options.pe_mutator {
                 BDCoreMutator::Pe(pe_mutator_from_options(self.options))
             } else if self.options.beria_vm {
-                BDCoreMutator::Beria(crate::mutator::BeriaWorkbufMutator::default())
+                BDCoreMutator::Beria(BeriaWorkbufMutator::default())
             } else if self.options.morphinep {
-                BDCoreMutator::Morphinep(crate::mutator::MorphinepStreamMutator::default())
+                BDCoreMutator::Morphinep(MorphinepStreamMutator::default())
             } else if self.options.fixed_size_mutations {
                 BDCoreMutator::MoptFixed(StdMOptMutator::new(
                     &mut state,
@@ -563,9 +560,9 @@ where
                 }
             } else {
                 let mutator = if self.options.beria_vm {
-                    BDCoreMutator::Beria(crate::mutator::BeriaWorkbufMutator::default())
+                    BDCoreMutator::Beria(BeriaWorkbufMutator::default())
                 } else if self.options.morphinep {
-                    BDCoreMutator::Morphinep(crate::mutator::MorphinepStreamMutator::default())
+                    BDCoreMutator::Morphinep(MorphinepStreamMutator::default())
                 } else if self.options.fixed_size_mutations {
                     BDCoreMutator::MoptFixed(StdMOptMutator::new(
                         &mut state,

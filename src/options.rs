@@ -365,11 +365,11 @@ impl FuzzerOptions {
             || self.resource_dir
             || self.data_dir
     }
-/*
-    pub fn uses_pe_mutator(&self) -> bool {
-        self.pe_mutator || self.section_body_mutator
-    }
-*/
+    /*
+        pub fn uses_pe_mutator(&self) -> bool {
+            self.pe_mutator || self.section_body_mutator
+        }
+    */
     fn absolutize_path(path: PathBuf) -> PathBuf {
         if path.is_absolute() {
             path

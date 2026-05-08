@@ -5,7 +5,7 @@ mod bitdefender;
 mod client;
 mod harness;
 mod instance;
-mod mutator;
+mod mutators;
 mod scan_profile;
 mod utils;
 
