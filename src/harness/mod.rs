@@ -2,6 +2,7 @@ mod beria_vm;
 mod ceva_emu;
 mod ceva_target;
 mod decode_execute_cold_path;
+mod morphinep;
 mod pec3_unpack;
 mod petite_unpack;
 mod standard;

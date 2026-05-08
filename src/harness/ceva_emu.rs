@@ -209,6 +209,29 @@ impl<'a> CevaEmuHarness<'a> {
         Ok(())
     }
 
+    fn run_until_exit(&self) -> Result<(), Error> {
+        loop {
+            unsafe {
+                let _ = self.qemu.run();
+            };
+
+            let pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+            if pc == self.exit_point {
+                return Ok(());
+            }
+
+            if self.target.as_ref().unwrap().handle_breakpoint(self)? {
+                continue;
+            }
+
+            log::debug!(
+                "CevaEmu stopped at unexpected breakpoint pc={pc:#x} expected_exit={:#x}",
+                self.exit_point,
+            );
+            return Ok(());
+        }
+    }
+
     pub fn run(&self, input: &BytesInput, scan_profile: Option<&ScanProfile>) -> ExitKind {
         let target = input.target_bytes();
         let mut buf = target.as_slice();
@@ -243,9 +266,7 @@ impl<'a> CevaEmuHarness<'a> {
                 self.exit_point,
             );
             let guest_exec_started_at = Instant::now();
-            unsafe {
-                let _ = self.qemu.run();
-            };
+            self.run_until_exit().unwrap();
             let post_pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
             let post_sp: GuestAddr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
             log::debug!(
@@ -267,9 +288,7 @@ impl<'a> CevaEmuHarness<'a> {
             self.ret_addr,
             self.exit_point,
         );
-        unsafe {
-            let _ = self.qemu.run();
-        };
+        self.run_until_exit().unwrap();
         let post_pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
         let post_sp: GuestAddr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
         log::debug!(

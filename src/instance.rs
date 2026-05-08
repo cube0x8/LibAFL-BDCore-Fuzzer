@@ -490,6 +490,8 @@ where
                 BDCoreMutator::Pe(pe_mutator_from_options(self.options))
             } else if self.options.beria_vm {
                 BDCoreMutator::Beria(crate::mutator::BeriaWorkbufMutator::default())
+            } else if self.options.morphinep {
+                BDCoreMutator::Morphinep(crate::mutator::MorphinepStreamMutator::default())
             } else if self.options.fixed_size_mutations {
                 BDCoreMutator::MoptFixed(StdMOptMutator::new(
                     &mut state,
@@ -565,6 +567,8 @@ where
             } else {
                 let mutator = if self.options.beria_vm {
                     BDCoreMutator::Beria(crate::mutator::BeriaWorkbufMutator::default())
+                } else if self.options.morphinep {
+                    BDCoreMutator::Morphinep(crate::mutator::MorphinepStreamMutator::default())
                 } else if self.options.fixed_size_mutations {
                     BDCoreMutator::MoptFixed(StdMOptMutator::new(
                         &mut state,

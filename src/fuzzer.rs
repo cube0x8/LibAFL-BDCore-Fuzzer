@@ -264,6 +264,7 @@ impl Fuzzer {
             || self.options.beria_vm
             || self.options.petite_a4
             || self.options.petite_2000
+            || self.options.morphinep
             || self.options.pec3_a4
             || self.options.pec3_40
             || self.options.pec3_28
@@ -277,6 +278,8 @@ impl Fuzzer {
                 CevaTargetKind::PetiteA4
             } else if self.options.petite_2000 {
                 CevaTargetKind::Petite2000
+            } else if self.options.morphinep {
+                CevaTargetKind::Morphinep
             } else if self.options.pec3_a4 {
                 CevaTargetKind::Pec3A4
             } else if self.options.pec3_40 {

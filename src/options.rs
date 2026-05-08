@@ -297,6 +297,12 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
+        help = "Target morphinep.xmd worker and emulate its local seek/read thunks from a Rust-backed fake stream"
+    )]
+    pub morphinep: bool,
+
+    #[arg(
+        long,
         help = "Target pec3.xmd worker entry and mutate the a4 staged entry-stub buffer"
     )]
     pub pec3_a4: bool,
@@ -345,6 +351,7 @@ impl FuzzerOptions {
             || self.beria_vm
             || self.petite_a4
             || self.petite_2000
+            || self.morphinep
             || self.pec3_a4
             || self.pec3_40
             || self.pec3_28
@@ -633,6 +640,7 @@ impl FuzzerOptions {
             self.beria_vm,
             self.petite_a4,
             self.petite_2000,
+            self.morphinep,
             self.pec3_a4,
             self.pec3_40,
             self.pec3_28,
