@@ -24,7 +24,7 @@ use libafl_qemu::{
 
 use crate::{
     bitdefender::{module_for_addr, BDModule},
-    harness::FuzzHarness,
+    harness::{FuzzHarness, PcSignal, PcSignalModule},
     instance::Instance,
     options::FuzzerOptions,
     scan_profile::{ScanProfile, ScanRestoreEndModule, ScanRestoreStartModule},
@@ -47,6 +47,53 @@ pub struct Client<'a> {
 }
 
 impl<'a> Client<'a> {
+    fn unpacker_progress_module(&self) -> Result<PcSignalModule, Error> {
+        if !self.options.ceva_health_signals {
+            return Ok(PcSignalModule::disabled());
+        }
+
+        const ASPACK_SIGNAL_SPECS: &[(&str, &str)] = &[
+            ("generic_ver_write", "aspack.xmd:+0x58a"),
+            ("special_v10", "aspack.xmd:+0x634"),
+            ("ver_10804_a", "aspack.xmd:+0x665"),
+            ("ver_10804_b", "aspack.xmd:+0x686"),
+            ("ver_10803", "aspack.xmd:+0x6a7"),
+            ("builder_setup", "aspack.xmd:+0x7ae"),
+            ("entry_loop", "aspack.xmd:+0x820"),
+            ("commit_call", "aspack.xmd:+0x8b9"),
+            ("name_write", "aspack.xmd:+0x8f8"),
+        ];
+
+        const MORPHINEP_SIGNAL_SPECS: &[(&str, &str)] = &[
+            ("a870", "morphinep.xmd:+0x870"),
+            ("a8d0", "morphinep.xmd:+0x8d0"),
+            ("a970", "morphinep.xmd:+0x970"),
+        ];
+
+        let (target_name, signal_specs): (&'static str, &[(&str, &str)]) = if self.options.aspack_worker {
+            ("AspackProgress", ASPACK_SIGNAL_SPECS)
+        } else if self.options.morphinep {
+            ("MorphinepProgress", MORPHINEP_SIGNAL_SPECS)
+        } else {
+            return Ok(PcSignalModule::disabled());
+        };
+
+        let mut signals = Vec::with_capacity(signal_specs.len());
+        let modules = &self.harness.bd_engine().modules;
+        for (name, spec) in signal_specs {
+            let pc = Self::resolve_module_relative_address(modules, spec).ok_or_else(|| {
+                Error::unknown(format!("Failed to resolve unpacker progress PC spec '{spec}'"))
+            })?;
+            signals.push(PcSignal { name, pc });
+        }
+
+        Ok(PcSignalModule::new(
+            target_name,
+            self.options.ceva_health_log_every,
+            signals,
+        ))
+    }
+
     fn coverage_address_filter(&self) -> StdAddressFilter {
         self.harness
             .bd_engine()
@@ -343,6 +390,7 @@ impl<'a> Client<'a> {
                 self.harness.snapshot_excludes(),
             )]);
 
+        let unpacker_progress_module = self.unpacker_progress_module()?;
         let snapshot_module = SnapshotModule::with_filters(interval_snapshot_filters);
         let asan_module = if is_asan {
             match self.preinitialized_asan_module.take() {
@@ -372,6 +420,7 @@ impl<'a> Client<'a> {
                             snapshot_module,
                             ScanRestoreEndModule::new(scan_profile),
                             asan_module,
+                            unpacker_progress_module,
                             cmplog,
                         ),
                         state,
@@ -379,7 +428,7 @@ impl<'a> Client<'a> {
                 } else {
                     instance
                         .build()
-                        .run(tuple_list!(snapshot_module, asan_module, cmplog,), state)
+                        .run(tuple_list!(snapshot_module, asan_module, unpacker_progress_module, cmplog,), state)
                 }
             } else {
                 if let Some(scan_profile) = self.scan_profile.clone() {
@@ -388,6 +437,7 @@ impl<'a> Client<'a> {
                             ScanRestoreStartModule::new(scan_profile.clone()),
                             snapshot_module,
                             ScanRestoreEndModule::new(scan_profile),
+                            unpacker_progress_module,
                             cmplog,
                         ),
                         state,
@@ -395,7 +445,7 @@ impl<'a> Client<'a> {
                 } else {
                     instance
                         .build()
-                        .run(tuple_list!(snapshot_module, cmplog,), state)
+                        .run(tuple_list!(snapshot_module, unpacker_progress_module, cmplog,), state)
                 }
             }
         } else if self.options.rerun_input.is_some() && self.options.drcov.is_some() {
@@ -427,9 +477,13 @@ impl<'a> Client<'a> {
             };
 
             if let Some(asan_module) = asan_module {
-                instance.build().run(tuple_list!(asan_module, drcov), state)
+                instance
+                    .build()
+                    .run(tuple_list!(asan_module, unpacker_progress_module, drcov), state)
             } else {
-                instance.build().run(tuple_list!(drcov), state)
+                instance
+                    .build()
+                    .run(tuple_list!(unpacker_progress_module, drcov), state)
             }
         } else {
             if let Some(asan_module) = asan_module {
@@ -440,13 +494,14 @@ impl<'a> Client<'a> {
                             snapshot_module,
                             ScanRestoreEndModule::new(scan_profile),
                             asan_module,
+                            unpacker_progress_module,
                         ),
                         state,
                     )
                 } else {
                     instance
                         .build()
-                        .run(tuple_list!(snapshot_module, asan_module,), state)
+                        .run(tuple_list!(snapshot_module, asan_module, unpacker_progress_module,), state)
                 }
             } else {
                 if let Some(scan_profile) = self.scan_profile.clone() {
@@ -455,11 +510,14 @@ impl<'a> Client<'a> {
                             ScanRestoreStartModule::new(scan_profile.clone()),
                             snapshot_module,
                             ScanRestoreEndModule::new(scan_profile),
+                            unpacker_progress_module,
                         ),
                         state,
                     )
                 } else {
-                    instance.build().run(tuple_list!(snapshot_module,), state)
+                    instance
+                        .build()
+                        .run(tuple_list!(snapshot_module, unpacker_progress_module,), state)
                 }
             }
         }

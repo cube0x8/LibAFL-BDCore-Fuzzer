@@ -262,30 +262,42 @@ impl Fuzzer {
         let harness = if self.options.translate_node_link
             || self.options.decode_execute_cold_path
             || self.options.beria_vm
+            || self.options.aspack_worker
             || self.options.petite_a4
             || self.options.petite_2000
             || self.options.morphinep
+            || self.options.pelock
             || self.options.pec3_a4
             || self.options.pec3_40
             || self.options.pec3_28
+            || self.options.pec3_peviewer
+            || self.options.pec3_hash
         {
             let entry_point = self.options.entry_point.clone().unwrap();
             let target_kind = if self.options.translate_node_link {
                 CevaTargetKind::TranslateNodeLink
             } else if self.options.beria_vm {
                 CevaTargetKind::BeriaVm
+            } else if self.options.aspack_worker {
+                CevaTargetKind::AspackWorker
             } else if self.options.petite_a4 {
                 CevaTargetKind::PetiteA4
             } else if self.options.petite_2000 {
                 CevaTargetKind::Petite2000
             } else if self.options.morphinep {
                 CevaTargetKind::Morphinep
+            } else if self.options.pelock {
+                CevaTargetKind::Pelock
             } else if self.options.pec3_a4 {
                 CevaTargetKind::Pec3A4
             } else if self.options.pec3_40 {
                 CevaTargetKind::Pec3Read40
             } else if self.options.pec3_28 {
                 CevaTargetKind::Pec3Read28
+            } else if self.options.pec3_peviewer {
+                CevaTargetKind::Pec3Peviewer
+            } else if self.options.pec3_hash {
+                CevaTargetKind::Pec3Hash
             } else {
                 CevaTargetKind::DecodeExecuteColdPath
             };
@@ -294,6 +306,8 @@ impl Fuzzer {
                 entry_point,
                 target_kind.build(),
                 self.options.max_target_input_size,
+                self.options.ceva_health_signals,
+                self.options.ceva_health_log_every,
             )?;
             harness.init(
                 self.options.bitdefender_modules.clone(),

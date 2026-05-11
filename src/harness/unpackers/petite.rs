@@ -3,6 +3,7 @@ use std::cell::Cell;
 use libafl::Error;
 use libafl_qemu::{GuestAddr, GuestReg, Qemu, Regs};
 
+use crate::harness::unpackers::health::UnpackerHealth;
 use crate::harness::unpackers::stream::StagedReadStream;
 use crate::harness::{CevaEmuHarness, CevaTarget};
 
@@ -10,6 +11,21 @@ const DEBUG_INPUT_BYTES_LEN: usize = 32;
 const PETITE_STAGE2_LEN: usize = 0x2000;
 const PETITE_SEEK_THUNK_OFFSET: GuestAddr = 0xDF8;
 const PETITE_READ_THUNK_OFFSET: GuestAddr = 0xE08;
+
+const SLOT_STAGE0_SEEK: usize = 0;
+const SLOT_STAGE0_READ: usize = 1;
+const SLOT_STAGE0_EQUAL: usize = 2;
+const SLOT_STAGE0_SHORT: usize = 3;
+const SLOT_STAGE0_ZERO: usize = 4;
+const SLOT_COMPLETED: usize = 5;
+const PETITE_HEALTH_SLOTS: &[&str] = &[
+    "stage0_seek",
+    "stage0_read",
+    "stage0_equal",
+    "stage0_short",
+    "stage0_zero",
+    "completed",
+];
 
 fn format_bytes(bytes: &[u8]) -> String {
     bytes
@@ -115,11 +131,24 @@ impl CevaTarget for PetiteA4Target {
     }
 }
 
-#[derive(Default)]
 pub struct Petite2000Target {
     seek_pc: Cell<GuestAddr>,
     read_pc: Cell<GuestAddr>,
+    read_count: Cell<u32>,
+    health: UnpackerHealth,
     stream: StagedReadStream,
+}
+
+impl Default for Petite2000Target {
+    fn default() -> Self {
+        Self {
+            seek_pc: Cell::new(0),
+            read_pc: Cell::new(0),
+            read_count: Cell::new(0),
+            health: UnpackerHealth::new("Petite2000", PETITE_HEALTH_SLOTS),
+            stream: StagedReadStream::default(),
+        }
+    }
 }
 
 impl CevaTarget for Petite2000Target {
@@ -151,6 +180,8 @@ impl CevaTarget for Petite2000Target {
     fn reset(&self, harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
         restore_nonvolatile_regs(harness)?;
         self.stream.reset();
+        self.read_count.set(0);
+        self.health.reset_run();
         Ok(())
     }
 
@@ -159,15 +190,48 @@ impl CevaTarget for Petite2000Target {
         let pc: GuestAddr = qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
 
         if pc == self.seek_pc.get() {
-            self.stream.emulate_seek(qemu)?;
+            if harness.health_signals_enabled() {
+                self.health.hit(SLOT_STAGE0_SEEK);
+            }
+            let _ = self.stream.emulate_seek(qemu)?;
             return Ok(true);
         }
 
         if pc == self.read_pc.get() {
-            self.stream.emulate_read(qemu)?;
+            let requested: usize = qemu
+                .read_reg(Regs::R8)
+                .unwrap()
+                .try_into()
+                .unwrap_or(usize::MAX);
+            let copied = self.stream.emulate_read(qemu)?;
+            let read_index = self.read_count.get();
+            self.read_count.set(read_index.saturating_add(1));
+
+            if harness.health_signals_enabled() && read_index == 0 {
+                if copied != 0 {
+                    self.health.hit(SLOT_STAGE0_READ);
+                }
+                if copied == 0 {
+                    self.health.hit(SLOT_STAGE0_ZERO);
+                } else if copied == requested {
+                    self.health.hit(SLOT_STAGE0_EQUAL);
+                } else {
+                    self.health.hit(SLOT_STAGE0_SHORT);
+                }
+            }
             return Ok(true);
         }
 
         Ok(false)
+    }
+
+    fn after_run(&self, harness: &CevaEmuHarness<'_>, execs: u64) -> Result<(), Error> {
+        if !harness.health_signals_enabled() {
+            return Ok(());
+        }
+
+        self.health.hit(SLOT_COMPLETED);
+        self.health.record_run(execs, harness.health_log_every());
+        Ok(())
     }
 }

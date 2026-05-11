@@ -85,7 +85,7 @@ impl MemoryBackedStream {
         self.state.borrow_mut().pos = 0;
     }
 
-    pub fn emulate_seek(&self, qemu: &Qemu) -> Result<(), Error> {
+    pub fn emulate_seek(&self, qemu: &Qemu) -> Result<usize, Error> {
         let off: i64 = qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
         let action: u64 = qemu.read_reg(Regs::R8).unwrap().try_into().unwrap();
 
@@ -100,10 +100,11 @@ impl MemoryBackedStream {
         let new_pos = (base.saturating_add(off)).clamp(0, len) as usize;
         state.pos = new_pos;
 
-        skip_guest_call(qemu, new_pos as u64)
+        skip_guest_call(qemu, new_pos as u64)?;
+        Ok(new_pos)
     }
 
-    pub fn emulate_read(&self, qemu: &Qemu) -> Result<(), Error> {
+    pub fn emulate_read(&self, qemu: &Qemu) -> Result<usize, Error> {
         let dst: GuestAddr = qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
         let requested: usize = qemu
             .read_reg(Regs::R8)
@@ -124,7 +125,8 @@ impl MemoryBackedStream {
         }
 
         state.pos = end;
-        skip_guest_call(qemu, to_copy as u64)
+        skip_guest_call(qemu, to_copy as u64)?;
+        Ok(to_copy)
     }
 }
 
@@ -142,7 +144,7 @@ impl StagedReadStream {
         state.pos = 0;
     }
 
-    pub fn emulate_seek(&self, qemu: &Qemu) -> Result<(), Error> {
+    pub fn emulate_seek(&self, qemu: &Qemu) -> Result<usize, Error> {
         let off: i64 = qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
         let action: u64 = qemu.read_reg(Regs::R8).unwrap().try_into().unwrap();
 
@@ -161,10 +163,11 @@ impl StagedReadStream {
         let new_pos = (base.saturating_add(off)).clamp(0, end) as usize;
         state.pos = new_pos;
 
-        skip_guest_call(qemu, new_pos as u64)
+        skip_guest_call(qemu, new_pos as u64)?;
+        Ok(new_pos)
     }
 
-    pub fn emulate_read(&self, qemu: &Qemu) -> Result<(), Error> {
+    pub fn emulate_read(&self, qemu: &Qemu) -> Result<usize, Error> {
         let dst: GuestAddr = qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
         let requested: usize = qemu
             .read_reg(Regs::R8)
@@ -184,6 +187,7 @@ impl StagedReadStream {
 
         state.next_stage = state.next_stage.saturating_add(1);
         state.pos = state.pos.saturating_add(to_copy);
-        skip_guest_call(qemu, to_copy as u64)
+        skip_guest_call(qemu, to_copy as u64)?;
+        Ok(to_copy)
     }
 }

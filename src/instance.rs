@@ -439,15 +439,17 @@ where
                 .expect("Error running target");
             drop(executor);
 
-            log::debug!("Coverage file generate correctly. Compressing...");
-
-            // TEMP: gzip compress the output file
-            let output_file_path = self.options.drcov.as_ref().clone();
-            if let Err(e) = utils::compress_and_replace(output_file_path.unwrap()) {
-                log::error!("Compression error: {}", e);
-                process::exit(-1);
+            if let Some(output_file_path) = self.options.drcov.as_ref().cloned() {
+                log::debug!("Coverage file generated correctly. Compressing...");
+                if let Err(e) = utils::compress_and_replace(&output_file_path) {
+                    log::error!("Compression error: {}", e);
+                    process::exit(-1);
+                } else {
+                    log::info!("Output file successfully compressed. We're done! :).");
+                    process::exit(0);
+                }
             } else {
-                log::info!("Output file successfully compressed. We're done! :).");
+                log::info!("Single rerun completed. We're done! :).");
                 process::exit(0);
             }
         }

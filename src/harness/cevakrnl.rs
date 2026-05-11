@@ -8,6 +8,7 @@ use libafl::{
 use libafl_bolts::AsSlice;
 use libafl_qemu::{ArchExtras, GuestAddr, GuestReg, Qemu, Regs};
 use std::{
+    cell::Cell,
     ops::Range,
     thread,
     time::{Duration, Instant},
@@ -38,6 +39,9 @@ pub struct CevaEmuHarness<'a> {
     entry_point_spec: String,
     target: Option<Box<dyn CevaTarget>>,
     max_target_input_size: usize,
+    health_signals_enabled: bool,
+    health_log_every: u64,
+    exec_counter: Cell<u64>,
 }
 
 impl<'a> CevaEmuHarness<'a> {
@@ -46,6 +50,8 @@ impl<'a> CevaEmuHarness<'a> {
         entry_point_spec: String,
         target: Box<dyn CevaTarget>,
         max_target_input_size: usize,
+        health_signals_enabled: bool,
+        health_log_every: u64,
     ) -> Result<CevaEmuHarness<'a>, Error> {
         let mut elf_buffer = Vec::new();
         let elf =
@@ -101,11 +107,22 @@ impl<'a> CevaEmuHarness<'a> {
             entry_point_spec,
             target: Some(target),
             max_target_input_size,
+            health_signals_enabled,
+            health_log_every,
+            exec_counter: Cell::new(0),
         })
     }
 
     pub fn qemu(&self) -> &Qemu {
         self.qemu
+    }
+
+    pub fn health_signals_enabled(&self) -> bool {
+        self.health_signals_enabled
+    }
+
+    pub fn health_log_every(&self) -> u64 {
+        self.health_log_every
     }
 
     pub fn snapshot_excludes(&self) -> Vec<Range<u64>> {
@@ -134,8 +151,23 @@ impl<'a> CevaEmuHarness<'a> {
             let _ = self.qemu.run();
         };
 
-        let entry_point_return_address: GuestAddr =
-            self.qemu.read_return_address().unwrap().try_into().unwrap();
+        let post_entry_run_pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+        println!(
+            "CevaEmu init post-entry run pc={post_entry_run_pc:#x} expected_entry={:#x}",
+            self.entry_point
+        );
+
+        let entry_point_return_address: GuestAddr = match self.qemu.read_return_address() {
+            Ok(ret) => ret.try_into().unwrap(),
+            Err(err) => {
+                println!(
+                    "CevaEmu init failed to read return address at pc={post_entry_run_pc:#x}: {err:?}"
+                );
+                return Err(Error::unknown(format!(
+                    "failed to read return address after entry run at pc={post_entry_run_pc:#x}: {err:?}"
+                )));
+            }
+        };
         println!("Return address = {entry_point_return_address:#x}");
 
         self.exit_point = entry_point_return_address;
@@ -275,6 +307,9 @@ impl<'a> CevaEmuHarness<'a> {
                 post_pc == self.exit_point,
             );
             scan_profile.record_guest_exec(guest_exec_started_at.elapsed(), buf.len(), truncated);
+            let execs = self.exec_counter.get().saturating_add(1);
+            self.exec_counter.set(execs);
+            self.target.as_ref().unwrap().after_run(self, execs).unwrap();
             return ExitKind::Ok;
         }
 
@@ -296,6 +331,9 @@ impl<'a> CevaEmuHarness<'a> {
             self.exit_point,
             post_pc == self.exit_point,
         );
+        let execs = self.exec_counter.get().saturating_add(1);
+        self.exec_counter.set(execs);
+        self.target.as_ref().unwrap().after_run(self, execs).unwrap();
         ExitKind::Ok
     }
 }

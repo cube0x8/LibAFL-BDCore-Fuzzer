@@ -12,6 +12,7 @@ use crate::{bitdefender::BDEngine, scan_profile::ScanProfile};
 
 pub use cevakrnl::CevaEmuHarness;
 pub use cevakrnl_target::{CevaTarget, CevaTargetKind};
+pub use unpackers::health::{PcSignal, PcSignalModule};
 pub use scanfile::Harness;
 
 pub const DEFAULT_MAX_INPUT_SIZE: usize = 1_048_576;

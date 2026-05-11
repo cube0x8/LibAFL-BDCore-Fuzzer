@@ -285,6 +285,12 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
+        help = "Target aspack.xmd worker entry and mutate the live worker buffer from the unpack context"
+    )]
+    pub aspack_worker: bool,
+
+    #[arg(
+        long,
         help = "Target petite.xmd worker entry and mutate the a4 staged entry-stub buffer"
     )]
     pub petite_a4: bool,
@@ -300,6 +306,12 @@ pub struct FuzzerOptions {
         help = "Target morphinep.xmd worker and emulate its local seek/read thunks from a Rust-backed fake stream"
     )]
     pub morphinep: bool,
+
+    #[arg(
+        long,
+        help = "Target pelock.xmd worker and emulate its local seek/read thunks from a Rust-backed fake stream"
+    )]
+    pub pelock: bool,
 
     #[arg(
         long,
@@ -321,6 +333,18 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
+        help = "Target pec3.xmd worker entry for the dominant PECompact family, replaying read40/read10/read28/main with a fixed family header and fuzzed read40/read28/main buffers"
+    )]
+    pub pec3_peviewer: bool,
+
+    #[arg(
+        long,
+        help = "Target pec3.xmd worker entry for the alternate PECompact Hash family, replaying read40/read10/read28/main with a fixed family header and fuzzed read40/read28/main buffers"
+    )]
+    pub pec3_hash: bool,
+
+    #[arg(
+        long,
         value_parser = clap::value_parser!(u64).range(2..),
         help = "Maximum entry-point breakpoint hit count for --decode-execute-cold-path"
     )]
@@ -331,6 +355,20 @@ pub struct FuzzerOptions {
         help = "Entry point for ceva_emu targeted mutations in format module:+offset"
     )]
     pub entry_point: Option<String>,
+
+    #[arg(
+        long,
+        help = "Enable optional unpacker health probes for ceva_emu targets. This adds extra breakpoint exits to surface parser progress and branch reachability."
+    )]
+    pub ceva_health_signals: bool,
+
+    #[arg(
+        long,
+        default_value = "10000",
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "Emit ceva_emu health summaries every N executions when --ceva-health-signals is enabled"
+    )]
+    pub ceva_health_log_every: u64,
 
     #[arg(
         long,
@@ -349,12 +387,16 @@ impl FuzzerOptions {
         self.translate_node_link
             || self.decode_execute_cold_path
             || self.beria_vm
+            || self.aspack_worker
             || self.petite_a4
             || self.petite_2000
             || self.morphinep
+            || self.pelock
             || self.pec3_a4
             || self.pec3_40
             || self.pec3_28
+            || self.pec3_peviewer
+            || self.pec3_hash
     }
 
     fn any_pe_mutation_group_selected(&self) -> bool {
@@ -638,12 +680,16 @@ impl FuzzerOptions {
             self.translate_node_link,
             self.decode_execute_cold_path,
             self.beria_vm,
+            self.aspack_worker,
             self.petite_a4,
             self.petite_2000,
             self.morphinep,
+            self.pelock,
             self.pec3_a4,
             self.pec3_40,
             self.pec3_28,
+            self.pec3_peviewer,
+            self.pec3_hash,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
