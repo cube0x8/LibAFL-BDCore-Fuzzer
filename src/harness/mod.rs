@@ -13,6 +13,13 @@ use crate::{bitdefender::BDEngine, scan_profile::ScanProfile};
 pub use cevakrnl::CevaEmuHarness;
 pub use cevakrnl_target::{CevaTarget, CevaTargetKind};
 pub use scanfile::Harness;
+pub use unpackers::health::{
+    PcSignal, PcSignalModule, Pelock07d60RetModule, Pelock07d60WindowCaptureModule,
+    PelockStage0CaptureModule,
+};
+pub use unpackers::upack_progress::{
+    seed_bootstrap_windows, snapshot_windows, UPACK_ENTRY_STUB_LEN, UPACK_MAX_STREAM_LEN,
+};
 
 pub const DEFAULT_MAX_INPUT_SIZE: usize = 1_048_576;
 pub const DEFAULT_MAX_TARGET_INPUT_SIZE: usize = 307_200;

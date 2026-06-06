@@ -10,12 +10,17 @@ use libafl::{
 use libafl_bolts::Named;
 use libafl_pe_mutator::PeMutator;
 
-use super::{BeriaWorkbufMutator, FixedSizeHavocMutationsType, MorphinepStreamMutator};
+use super::{
+    BeriaWorkbufMutator, FixedSizeHavocMutationsType, MorphinepStreamMutator, PelockStubMutator,
+    UpackWindowMutator,
+};
 
 pub enum BDCoreMutator {
     Pe(PeMutator),
     Beria(BeriaWorkbufMutator),
     Morphinep(MorphinepStreamMutator),
+    Pelock(PelockStubMutator),
+    Upack(UpackWindowMutator),
     Mopt(StdMOptMutator<HavocMutationsType>),
     MoptFixed(StdMOptMutator<FixedSizeHavocMutationsType>),
 }
@@ -26,6 +31,8 @@ impl Named for BDCoreMutator {
             Self::Pe(m) => m.name(),
             Self::Beria(m) => m.name(),
             Self::Morphinep(m) => m.name(),
+            Self::Pelock(m) => m.name(),
+            Self::Upack(m) => m.name(),
             Self::Mopt(m) => m.name(),
             Self::MoptFixed(m) => m.name(),
         }
@@ -41,6 +48,8 @@ where
             Self::Pe(m) => m.mutate(state, input),
             Self::Beria(m) => m.mutate(state, input),
             Self::Morphinep(m) => m.mutate(state, input),
+            Self::Pelock(m) => m.mutate(state, input),
+            Self::Upack(m) => m.mutate(state, input),
             Self::Mopt(m) => m.mutate(state, input),
             Self::MoptFixed(m) => m.mutate(state, input),
         }
@@ -51,6 +60,8 @@ where
             Self::Pe(m) => m.post_exec(state, new_corpus_id),
             Self::Beria(m) => m.post_exec(state, new_corpus_id),
             Self::Morphinep(m) => m.post_exec(state, new_corpus_id),
+            Self::Pelock(m) => m.post_exec(state, new_corpus_id),
+            Self::Upack(m) => m.post_exec(state, new_corpus_id),
             Self::Mopt(m) => m.post_exec(state, new_corpus_id),
             Self::MoptFixed(m) => m.post_exec(state, new_corpus_id),
         }

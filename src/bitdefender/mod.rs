@@ -292,16 +292,35 @@ impl BDEngine {
             })?
         };
 
-        let module = self
+        let matching_modules = self
             .modules
             .iter()
-            .find(|module| module.name == module_name)
-            .ok_or_else(|| {
-                Error::unknown(format!(
-                    "{kind} module '{module_name}' not found. Available modules: {:?}",
-                    self.modules
-                ))
-            })?;
+            .filter(|module| module.name == module_name)
+            .collect::<Vec<_>>();
+
+        if matching_modules.is_empty() {
+            return Err(Error::unknown(format!(
+                "{kind} module '{module_name}' not found. Available modules: {:?}",
+                self.modules
+            )));
+        }
+
+        if matching_modules.len() > 1 {
+            println!(
+                "{} {} has {} matching module instances:",
+                kind.to_ascii_uppercase(),
+                spec,
+                matching_modules.len()
+            );
+            for module in &matching_modules {
+                println!(
+                    "  {} @ {:#x} size {:#x}",
+                    module.name, module.start_addr, module.size
+                );
+            }
+        }
+
+        let module = matching_modules.last().unwrap();
 
         let offset = offset as u64;
         let addr = module.start_addr.checked_add(offset).ok_or_else(|| {

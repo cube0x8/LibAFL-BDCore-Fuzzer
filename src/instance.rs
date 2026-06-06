@@ -34,7 +34,9 @@ use libafl_qemu::{
     Emulator, Qemu, QemuExecutor,
 };
 use std::{
-    fs, process,
+    fs,
+    path::{Path, PathBuf},
+    process,
     sync::Arc,
     time::{Duration, Instant},
 };
@@ -154,6 +156,7 @@ use crate::{
     harness::FuzzHarness,
     mutators::{
         havoc_fixed_size_mutations, BDCoreMutator, BeriaWorkbufMutator, MorphinepStreamMutator,
+        PelockStubMutator, UpackWindowMutator,
     },
     options::FuzzerOptions,
     scan_profile::ScanProfile,
@@ -308,6 +311,31 @@ where
         Ok(())
     }
 
+    fn collect_drcov_bulk_inputs(dir: &Path) -> Vec<PathBuf> {
+        let mut files = fs::read_dir(dir)
+            .unwrap_or_else(|err| panic!("Could not read DrCov bulk directory {dir:?}: {err}"))
+            .filter_map(|entry| match entry {
+                Ok(entry) => Some(entry.path()),
+                Err(err) => {
+                    log::warn!("Skipping unreadable DrCov bulk directory entry: {err}");
+                    None
+                }
+            })
+            .filter(|path| {
+                let is_regular_file = path.is_file();
+                let is_hidden_metadata = path
+                    .file_name()
+                    .and_then(|name| name.to_str())
+                    .map_or(false, |name| {
+                        name.starts_with('.') || name.ends_with(".metadata")
+                    });
+                is_regular_file && !is_hidden_metadata
+            })
+            .collect::<Vec<_>>();
+        files.sort();
+        files
+    }
+
     pub fn run<ET>(&mut self, mut modules: ET, state: Option<ClientState>) -> Result<(), Error>
     where
         ET: EmulatorModuleTuple<BytesInput, ClientState> + Debug,
@@ -418,11 +446,6 @@ where
             .build_with_qemu(*self.qemu)?;
 
         if let Some(rerun_input) = &self.options.rerun_input {
-            // TODO: We might want to support non-bytes inputs at some point?
-            let bytes = fs::read(rerun_input)
-                .unwrap_or_else(|_| panic!("Could not load file {rerun_input:?}"));
-            let input = BytesInput::new(bytes);
-
             let mut executor = QemuExecutor::new(
                 emulator,
                 &mut harness_fn,
@@ -433,22 +456,63 @@ where
                 self.options.timeout,
             )?;
 
-            log::debug!("Rerunning input with DrCov");
-            executor
-                .run_target(&mut fuzzer, &mut state, &mut self.mgr, &input)
-                .expect("Error running target");
+            let rerun_inputs = if self.options.drcov_bulk {
+                let files = Self::collect_drcov_bulk_inputs(rerun_input);
+                if files.is_empty() {
+                    return Err(Error::illegal_argument(format!(
+                        "DrCov bulk directory has no regular input files: {rerun_input:?}"
+                    )));
+                }
+                log::info!(
+                    "Running DrCov bulk mode over {} files from {:?}",
+                    files.len(),
+                    rerun_input
+                );
+                files
+            } else {
+                vec![rerun_input.clone()]
+            };
+
+            for (idx, rerun_input) in rerun_inputs.iter().enumerate() {
+                // TODO: We might want to support non-bytes inputs at some point?
+                let bytes = fs::read(rerun_input)
+                    .unwrap_or_else(|_| panic!("Could not load file {rerun_input:?}"));
+                let input = BytesInput::new(bytes);
+
+                log::debug!(
+                    "Rerunning input with DrCov ({}/{}) {:?}",
+                    idx + 1,
+                    rerun_inputs.len(),
+                    rerun_input
+                );
+                executor
+                    .run_target(&mut fuzzer, &mut state, &mut self.mgr, &input)
+                    .expect("Error running target");
+            }
             drop(executor);
 
-            log::debug!("Coverage file generate correctly. Compressing...");
-
-            // TEMP: gzip compress the output file
-            let output_file_path = self.options.drcov.as_ref().clone();
-            if let Err(e) = utils::compress_and_replace(output_file_path.unwrap()) {
-                log::error!("Compression error: {}", e);
-                process::exit(-1);
+            if let Some(output_file_path) = self.options.drcov.as_ref().cloned() {
+                if self.options.drcov_bulk {
+                    log::info!(
+                        "Bulk DrCov file generated at {:?}. We're done! :).",
+                        output_file_path
+                    );
+                    self.mgr.send_exiting()?;
+                    return Ok(());
+                } else {
+                    log::debug!("Coverage file generated correctly. Compressing...");
+                    if let Err(e) = utils::compress_and_replace(&output_file_path) {
+                        return Err(Error::unknown(format!("Compression error: {e}")));
+                    } else {
+                        log::info!("Output file successfully compressed. We're done! :).");
+                        self.mgr.send_exiting()?;
+                        return Ok(());
+                    }
+                }
             } else {
-                log::info!("Output file successfully compressed. We're done! :).");
-                process::exit(0);
+                log::info!("Single rerun completed. We're done! :).");
+                self.mgr.send_exiting()?;
+                return Ok(());
             }
         }
 
@@ -486,6 +550,10 @@ where
                 BDCoreMutator::Beria(BeriaWorkbufMutator::default())
             } else if self.options.morphinep {
                 BDCoreMutator::Morphinep(MorphinepStreamMutator::default())
+            } else if self.options.pelock {
+                BDCoreMutator::Pelock(PelockStubMutator::default())
+            } else if self.options.upack {
+                BDCoreMutator::Upack(UpackWindowMutator::default())
             } else if self.options.fixed_size_mutations {
                 BDCoreMutator::MoptFixed(StdMOptMutator::new(
                     &mut state,
@@ -563,6 +631,10 @@ where
                     BDCoreMutator::Beria(BeriaWorkbufMutator::default())
                 } else if self.options.morphinep {
                     BDCoreMutator::Morphinep(MorphinepStreamMutator::default())
+                } else if self.options.pelock {
+                    BDCoreMutator::Pelock(PelockStubMutator::default())
+                } else if self.options.upack {
+                    BDCoreMutator::Upack(UpackWindowMutator::default())
                 } else if self.options.fixed_size_mutations {
                     BDCoreMutator::MoptFixed(StdMOptMutator::new(
                         &mut state,
