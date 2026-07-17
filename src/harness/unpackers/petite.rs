@@ -4,13 +4,13 @@ use libafl::Error;
 use libafl_qemu::{GuestAddr, GuestReg, Qemu, Regs};
 
 use crate::harness::unpackers::health::UnpackerHealth;
-use crate::harness::unpackers::stream::StagedReadStream;
+use crate::harness::unpackers::stream::{MemoryBackedStream, StreamOverlay};
 use crate::harness::{CevaEmuHarness, CevaTarget};
 
 const DEBUG_INPUT_BYTES_LEN: usize = 32;
-const PETITE_STAGE2_LEN: usize = 0x2000;
 const PETITE_SEEK_THUNK_OFFSET: GuestAddr = 0xDF8;
 const PETITE_READ_THUNK_OFFSET: GuestAddr = 0xE08;
+const PETITE_MAX_STREAM_LEN: usize = 0x1_00000;
 
 const SLOT_STAGE0_SEEK: usize = 0;
 const SLOT_STAGE0_READ: usize = 1;
@@ -136,7 +136,7 @@ pub struct Petite2000Target {
     read_pc: Cell<GuestAddr>,
     read_count: Cell<u32>,
     health: UnpackerHealth,
-    stream: StagedReadStream,
+    stream: MemoryBackedStream,
 }
 
 impl Default for Petite2000Target {
@@ -146,9 +146,17 @@ impl Default for Petite2000Target {
             read_pc: Cell::new(0),
             read_count: Cell::new(0),
             health: UnpackerHealth::new("Petite2000", PETITE_HEALTH_SLOTS),
-            stream: StagedReadStream::default(),
+            stream: MemoryBackedStream::default(),
         }
     }
+}
+
+impl Petite2000Target {
+    const STREAM_LAYOUT: [StreamOverlay; 1] = [StreamOverlay {
+        input_offset: 0,
+        stream_offset: 0,
+        max_len: PETITE_MAX_STREAM_LEN,
+    }];
 }
 
 impl CevaTarget for Petite2000Target {
@@ -171,9 +179,11 @@ impl CevaTarget for Petite2000Target {
     }
 
     fn prepare_input(&self, _qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
-        let final_input_len: usize = PETITE_STAGE2_LEN.min(input_len as usize);
+        let final_input_len: usize = PETITE_MAX_STREAM_LEN
+            .min(input_len as usize)
+            .min(input.len());
         self.stream
-            .set_stages(vec![input[..final_input_len].to_vec()]);
+            .rebuild_with_overlays(&input[..final_input_len], &Self::STREAM_LAYOUT);
         Ok(())
     }
 

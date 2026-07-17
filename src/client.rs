@@ -13,13 +13,13 @@ use libafl_bolts::{rands::StdRand, tuples::tuple_list};
 use libafl_qemu::{
     modules::{
         asan_host::AsanError,
-        asan_host::{AsanErrorAction, AsanErrorCallback, AsanTargetCrash},
+        asan_host::{AsanErrorCallback, AsanTargetCrash},
         cmplog::CmpLogModule,
         snapshot::{IntervalSnapshotFilter, IntervalSnapshotFilters, SnapshotModule},
         utils::filters::StdAddressFilter,
         AsanHostModule, DrCovModule,
     },
-    Qemu,
+    ArchExtras, Qemu, Regs,
 };
 
 use crate::{
@@ -50,6 +50,28 @@ pub struct Client<'a> {
 }
 
 impl<'a> Client<'a> {
+    fn diagnostic_asan_callback() -> AsanErrorCallback {
+        AsanErrorCallback::new(Box::new(|_rt, qemu, pc, err| {
+            let rsp = qemu
+                .read_reg(Regs::Sp)
+                .ok()
+                .and_then(|value| value.try_into().ok());
+            let mut stack = [0u8; 16 * 8];
+            let stack_words = rsp.and_then(|rsp| {
+                qemu.read_mem(rsp, &mut stack).ok()?;
+                Some(
+                    stack
+                        .chunks_exact(8)
+                        .map(|word| u64::from_le_bytes(word.try_into().unwrap()))
+                        .collect::<Vec<_>>(),
+                )
+            });
+            eprintln!(
+                "BDCORE_ASAN_DIAG pc={pc:#x} error={err} rsp={rsp:?} stack={stack_words:x?}"
+            );
+        }))
+    }
+
     fn unpacker_progress_module(&self) -> Result<PcSignalModule, Error> {
         if !self.options.ceva_health_signals {
             return Ok(PcSignalModule::disabled());
@@ -78,10 +100,16 @@ impl<'a> Client<'a> {
             ("pelock_parse_stub", "pelock.xmd:+0x5004"),
             ("after_memset", "pelock.xmd:+0x50d6"),
             ("after_first_seek_read", "pelock.xmd:+0x5131"),
-            ("after_06b80", "pelock.xmd:+0x5174"),
+            ("returned_06b80", "pelock.xmd:+0x516c"),
+            ("passed_06b80", "pelock.xmd:+0x5174"),
+            ("second_parse_ep_stub_call", "pelock.xmd:+0x51be"),
+            ("second_parse_ep_stub_return", "pelock.xmd:+0x51c3"),
+            ("second_parse_ep_stub_nonnegative", "pelock.xmd:+0x51ce"),
             ("stage_0_parsing_done", "pelock.xmd:+0x51de"),
+            ("before_07d60", "pelock.xmd:+0x520e"),
             ("after_07d60", "pelock.xmd:+0x2158"),
             ("after_0cbb0", "pelock.xmd:+0x5257"),
+            ("decoder_call", "pelock.xmd:+0x5294"),
             ("after_06ad0", "pelock.xmd:+0x529d"),
             ("after_073f0", "pelock.xmd:+0x52b9"),
             ("after_06e40", "pelock.xmd:+0x5564"),
@@ -245,82 +273,13 @@ impl<'a> Client<'a> {
     }
 
     fn asan_module(&self) -> Result<AsanHostModule, Error> {
-        let skip_pcs = self.asan_skip_pcs()?;
-        let crash_log = self.options.crash_log_file.clone();
         let address_filter = self.coverage_address_filter();
-        let bd_modules = self.harness.bd_engine().modules.clone();
+        let _ = self.asan_skip_pcs()?;
 
         Ok(AsanHostModule::builder()
             .filter(address_filter)
-            .target_crash(AsanTargetCrash::OnTargetStop)
-            .error_callback(AsanErrorCallback::new(Box::new(move |_rt, _qemu, pc, err| {
-                if skip_pcs.contains(&(pc as u64)) {
-                    log::debug!("Skipping ASAN report for configured PC {pc:#x}: {err}");
-                    return AsanErrorAction::Ignore;
-                }
-
-                let pc_module = crate::bitdefender::module_for_addr(&bd_modules, pc as u64);
-                let module_name = pc_module
-                    .as_ref()
-                    .map_or_else(|| "unknown".to_string(), |module| module.name.clone());
-                let module_base = pc_module
-                    .as_ref()
-                    .map_or_else(|| "unknown".to_string(), |module| format!("{:#x}", module.start_addr));
-                let module_offset = pc_module
-                    .as_ref()
-                    .map_or_else(|| "unknown".to_string(), |module| format!("{:#x}", module.offset));
-
-                match &err {
-                    AsanError::Read(addr, size) => {
-                        utils::log_asan_error_msg(
-                            format!(
-                                "kind=read\npc={pc:#x}\npc_module={module_name}\npc_module_base={module_base}\npc_module_offset={module_offset}\naddr={addr:#x}\nsize={size}"
-                            ),
-                            &crash_log,
-                        );
-                    }
-                    AsanError::Write(addr, size) => {
-                        utils::log_asan_error_msg(
-                            format!(
-                                "kind=write\npc={pc:#x}\npc_module={module_name}\npc_module_base={module_base}\npc_module_offset={module_offset}\naddr={addr:#x}\nsize={size}"
-                            ),
-                            &crash_log,
-                        );
-                    }
-                    AsanError::BadFree(addr, interval) => {
-                        let msg = match interval {
-                            Some(interval) => format!(
-                                "kind=bad-free\npc={pc:#x}\npc_module={module_name}\npc_module_base={module_base}\npc_module_offset={module_offset}\naddr={addr:#x}\ninterval_start={:#x}\ninterval_end={:#x}",
-                                interval.start, interval.end
-                            ),
-                            None => {
-                                format!(
-                                    "kind=bad-free\npc={pc:#x}\npc_module={module_name}\npc_module_base={module_base}\npc_module_offset={module_offset}\naddr={addr:#x}\ninterval=none"
-                                )
-                            }
-                        };
-                        utils::log_asan_error_msg(msg, &crash_log);
-                    }
-                    AsanError::MemLeak(interval) => {
-                        utils::log_asan_error_msg(
-                            format!(
-                                "kind=memleak\npc={pc:#x}\npc_module={module_name}\npc_module_base={module_base}\npc_module_offset={module_offset}\ninterval_start={:#x}\ninterval_end={:#x}",
-                                interval.start, interval.end
-                            ),
-                            &crash_log,
-                        );
-                    }
-                    AsanError::Signal(sig) => {
-                        log::debug!(
-                            "Target signal observed while ASAN was enabled: signal={} pc={:#x}",
-                            sig,
-                            pc
-                        );
-                    }
-                }
-
-                AsanErrorAction::Report
-            })))
+            .target_crash(AsanTargetCrash::Never)
+            .error_callback(Self::diagnostic_asan_callback())
             .build())
     }
 
@@ -393,86 +352,12 @@ impl<'a> Client<'a> {
         options: &FuzzerOptions,
         known_modules: Arc<Mutex<Vec<BDModule>>>,
     ) -> Result<AsanHostModule, Error> {
-        let (skip_pc_literals, skip_pc_specs) = Self::parse_asan_skip_pc_specs(options)?;
-        let crash_log = options.crash_log_file.clone();
+        let _ = Self::parse_asan_skip_pc_specs(options)?;
+        drop(known_modules);
 
         Ok(AsanHostModule::builder()
-            .target_crash(AsanTargetCrash::OnTargetStop)
-            .error_callback(AsanErrorCallback::new(Box::new(move |_rt, _qemu, pc, err| {
-                let modules = known_modules
-                    .lock()
-                    .expect("ASAN module list mutex poisoned")
-                    .clone();
-
-                if Self::should_skip_asan_pc(pc as u64, &skip_pc_literals, &skip_pc_specs, &modules)
-                {
-                    log::debug!("Skipping ASAN report for configured PC {pc:#x}: {err}");
-                    return AsanErrorAction::Ignore;
-                }
-
-                let pc_module = module_for_addr(&modules, pc as u64);
-                let module_name = pc_module
-                    .as_ref()
-                    .map_or_else(|| "unknown".to_string(), |module| module.name.clone());
-                let module_base = pc_module.as_ref().map_or_else(
-                    || "unknown".to_string(),
-                    |module| format!("{:#x}", module.start_addr),
-                );
-                let module_offset = pc_module
-                    .as_ref()
-                    .map_or_else(|| "unknown".to_string(), |module| format!("{:#x}", module.offset));
-
-                match &err {
-                    AsanError::Read(addr, size) => {
-                        utils::log_asan_error_msg(
-                            format!(
-                                "kind=read\npc={pc:#x}\npc_module={module_name}\npc_module_base={module_base}\npc_module_offset={module_offset}\naddr={addr:#x}\nsize={size}"
-                            ),
-                            &crash_log,
-                        );
-                    }
-                    AsanError::Write(addr, size) => {
-                        utils::log_asan_error_msg(
-                            format!(
-                                "kind=write\npc={pc:#x}\npc_module={module_name}\npc_module_base={module_base}\npc_module_offset={module_offset}\naddr={addr:#x}\nsize={size}"
-                            ),
-                            &crash_log,
-                        );
-                    }
-                    AsanError::BadFree(addr, interval) => {
-                        let msg = match interval {
-                            Some(interval) => format!(
-                                "kind=bad-free\npc={pc:#x}\npc_module={module_name}\npc_module_base={module_base}\npc_module_offset={module_offset}\naddr={addr:#x}\ninterval_start={:#x}\ninterval_end={:#x}",
-                                interval.start, interval.end
-                            ),
-                            None => {
-                                format!(
-                                    "kind=bad-free\npc={pc:#x}\npc_module={module_name}\npc_module_base={module_base}\npc_module_offset={module_offset}\naddr={addr:#x}\ninterval=none"
-                                )
-                            }
-                        };
-                        utils::log_asan_error_msg(msg, &crash_log);
-                    }
-                    AsanError::MemLeak(interval) => {
-                        utils::log_asan_error_msg(
-                            format!(
-                                "kind=memleak\npc={pc:#x}\npc_module={module_name}\npc_module_base={module_base}\npc_module_offset={module_offset}\ninterval_start={:#x}\ninterval_end={:#x}",
-                                interval.start, interval.end
-                            ),
-                            &crash_log,
-                        );
-                    }
-                    AsanError::Signal(sig) => {
-                        log::debug!(
-                            "Target signal observed while ASAN was enabled: signal={} pc={:#x}",
-                            sig,
-                            pc
-                        );
-                    }
-                }
-
-                AsanErrorAction::Report
-            })))
+            .target_crash(AsanTargetCrash::Never)
+            .error_callback(Self::diagnostic_asan_callback())
             .build())
     }
 

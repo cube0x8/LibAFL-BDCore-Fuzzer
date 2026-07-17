@@ -257,9 +257,8 @@ impl Fuzzer {
             .use_asan_module()
             .then(|| Arc::new(Mutex::new(Vec::<BDModule>::new())));
         let mut preinitialized_asan_module = if let Some(known_modules) = &asan_known_modules {
-            let mut asan_module =
+            let asan_module =
                 Client::build_preinitialized_asan_module(&self.options, known_modules.clone())?;
-            asan_module.install_pre_run_tracking();
             Some(asan_module)
         } else {
             None

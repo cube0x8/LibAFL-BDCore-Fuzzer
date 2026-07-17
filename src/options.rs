@@ -101,9 +101,9 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
-        help = "Use only the PE section body mutator. Requires --section-index and conflicts with --pe-mutator",
+        help = "Use only the PE section body mutator. Requires --section-index and conflicts with --pe-mutator/--pelock",
         requires = "section_index",
-        conflicts_with = "pe_mutator"
+        conflicts_with_all = ["pe_mutator", "pelock"]
     )]
     pub section_body_mutator: bool,
 
@@ -116,15 +116,21 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
-        help = "Enable PE mutator reporting to /tmp/pe-report.txt. Requires --pe-mutator"
+        help = "Enable PE mutator reporting to /tmp/pe-report.txt. Requires --pe-mutator or --pelock"
     )]
     pub pe_mutator_reporting: bool,
 
     #[arg(
         long,
+        help = "Directory containing PE mutator input manifests. If omitted, --pe-mutator/--pelock also checks sidecars under --input/.pemutator."
+    )]
+    pub pe_manifest_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
         default_value_t = 2,
         value_parser = FuzzerOptions::parse_positive_usize,
-        help = "Minimum number of stacked PE mutations per pass. Requires --pe-mutator"
+        help = "Minimum number of stacked PE mutations per pass. Requires --pe-mutator or --pelock"
     )]
     pub pe_min_stack_depth: usize,
 
@@ -132,34 +138,43 @@ pub struct FuzzerOptions {
         long,
         default_value_t = 2,
         value_parser = FuzzerOptions::parse_positive_usize,
-        help = "Maximum number of stacked PE mutations per pass. Requires --pe-mutator"
+        help = "Maximum number of stacked PE mutations per pass. Requires --pe-mutator or --pelock"
     )]
     pub pe_max_stack_depth: usize,
 
-    #[arg(long, help = "Enable only PE header mutations. Requires --pe-mutator")]
+    #[arg(
+        long,
+        help = "Enable only PE header mutations. Requires --pe-mutator or --pelock"
+    )]
     pub pe_header: bool,
 
-    #[arg(long, help = "Enable only section mutations. Requires --pe-mutator")]
+    #[arg(
+        long,
+        help = "Enable only section mutations. Requires --pe-mutator or --pelock"
+    )]
     pub sections: bool,
 
-    #[arg(long, help = "Enable only assembly mutations. Requires --pe-mutator")]
+    #[arg(
+        long,
+        help = "Enable only assembly mutations. Requires --pe-mutator or --pelock"
+    )]
     pub assembly: bool,
 
     #[arg(
         long,
-        help = "Enable only export directory mutations. Requires --pe-mutator"
+        help = "Enable only export directory mutations. Requires --pe-mutator or --pelock"
     )]
     pub export_dir: bool,
 
     #[arg(
         long,
-        help = "Enable only resource directory mutations. Requires --pe-mutator"
+        help = "Enable only resource directory mutations. Requires --pe-mutator or --pelock"
     )]
     pub resource_dir: bool,
 
     #[arg(
         long,
-        help = "Enable only data directory entry mutations. Requires --pe-mutator"
+        help = "Enable only data directory entry mutations. Requires --pe-mutator or --pelock"
     )]
     pub data_dir: bool,
 
@@ -415,7 +430,7 @@ impl FuzzerOptions {
             || self.pec3_hash
     }
 
-    fn any_pe_mutation_group_selected(&self) -> bool {
+    pub(crate) fn any_pe_mutation_group_selected(&self) -> bool {
         self.pe_header
             || self.sections
             || self.assembly
@@ -423,11 +438,13 @@ impl FuzzerOptions {
             || self.resource_dir
             || self.data_dir
     }
-    /*
-        pub fn uses_pe_mutator(&self) -> bool {
-            self.pe_mutator || self.section_body_mutator
-        }
-    */
+    pub fn uses_pe_mutator(&self) -> bool {
+        self.pe_mutator || self.section_body_mutator || self.pelock
+    }
+
+    pub fn uses_full_pe_mutator(&self) -> bool {
+        self.pe_mutator || self.pelock
+    }
     fn absolutize_path(path: PathBuf) -> PathBuf {
         if path.is_absolute() {
             path
@@ -518,6 +535,12 @@ impl FuzzerOptions {
         }
     }
 
+    pub fn pe_manifest_dir(&self) -> Option<PathBuf> {
+        self.pe_manifest_dir
+            .as_ref()
+            .map(|path| Self::absolutize_path(path.clone()))
+    }
+
     pub fn output_dir(&self) -> Option<PathBuf> {
         if let Some(_) = &self.rerun_input {
             return Some(Self::absolutize_path(PathBuf::from("./drcov_output")));
@@ -570,29 +593,40 @@ impl FuzzerOptions {
     }
 
     pub fn validate(&self) {
-        if (self.pe_min_stack_depth != 2 || self.pe_max_stack_depth != 2) && !self.pe_mutator {
+        if (self.pe_min_stack_depth != 2 || self.pe_max_stack_depth != 2)
+            && !self.uses_full_pe_mutator()
+        {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
-                "Using --pe-min-stack-depth/--pe-max-stack-depth requires --pe-mutator",
+                "Using --pe-min-stack-depth/--pe-max-stack-depth requires --pe-mutator or --pelock",
             )
             .exit();
         }
 
-        if self.pe_mutator_reporting && !self.pe_mutator {
+        if self.pe_mutator_reporting && !self.uses_full_pe_mutator() {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
-                "Using --pe-mutator-reporting requires --pe-mutator",
+                "Using --pe-mutator-reporting requires --pe-mutator or --pelock",
             )
             .exit();
         }
 
-        if self.any_pe_mutation_group_selected() && !self.pe_mutator {
+        if self.any_pe_mutation_group_selected() && !self.uses_full_pe_mutator() {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
-                "Using --pe-header/--sections/--assembly/--export-dir/--resource-dir/--data-dir requires --pe-mutator",
+                "Using --pe-header/--sections/--assembly/--export-dir/--resource-dir/--data-dir requires --pe-mutator or --pelock",
+            )
+            .exit();
+        }
+
+        if self.section_body_mutator && self.pelock {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --section-body-mutator conflicts with --pelock",
             )
             .exit();
         }
@@ -610,7 +644,7 @@ impl FuzzerOptions {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
-                "Using --pe-mutator-reporting requires --pe-mutator and is not supported with --section-body-mutator",
+                "Using --pe-mutator-reporting requires --pe-mutator/--pelock and is not supported with --section-body-mutator",
             )
             .exit();
         }

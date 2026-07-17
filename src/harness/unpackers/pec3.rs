@@ -4,15 +4,13 @@ use libafl::Error;
 use libafl_qemu::{GuestAddr, GuestReg, Qemu, Regs};
 
 use crate::harness::unpackers::health::UnpackerHealth;
-use crate::harness::unpackers::stream::StagedReadStream;
+use crate::harness::unpackers::stream::{MemoryBackedStream, StreamOverlay};
 use crate::harness::{CevaEmuHarness, CevaTarget};
 
 const DEBUG_INPUT_BYTES_LEN: usize = 32;
-const PEC3_STAGE40_LEN: usize = 0x40;
-const PEC3_STAGE10_LEN: usize = 0x10;
-const PEC3_STAGE28_LEN: usize = 0x28;
 const PEC3_SEEK_THUNK_OFFSET: GuestAddr = 0x2C00;
 const PEC3_READ_THUNK_OFFSET: GuestAddr = 0x2C10;
+const PEC3_MAX_STREAM_LEN: usize = 0x1_00000;
 
 const SLOT_STAGE0_SEEK: usize = 0;
 const SLOT_STAGE1_SEEK: usize = 1;
@@ -86,30 +84,17 @@ const FAMILY_SLOT_STAGE2_ZERO: usize = 18;
 const FAMILY_SLOT_STAGE3_ZERO: usize = 19;
 const FAMILY_SLOT_COMPLETED: usize = 20;
 
-const PEC3_PEVIEWER_STAGE10: [u8; PEC3_STAGE10_LEN] = [
-    0x20, 0x3e, 0x18, 0x00, 0x30, 0x17, 0x00, 0x00, 0x34, 0x0a, 0x00, 0x00, 0x99, 0x49, 0x18, 0x00,
-];
-const PEC3_HASH_STAGE10: [u8; PEC3_STAGE10_LEN] = [
-    0xf4, 0x2f, 0x01, 0x00, 0xa0, 0x0e, 0x00, 0x00, 0xa4, 0x01, 0x00, 0x00, 0xd0, 0x36, 0x01, 0x00,
-];
-
 #[derive(Clone, Copy)]
 struct Pec3FamilySpec {
     target_name: &'static str,
-    stage10: &'static [u8; PEC3_STAGE10_LEN],
-    main_len: usize,
 }
 
 const PEC3_PEVIEWER_SPEC: Pec3FamilySpec = Pec3FamilySpec {
     target_name: "Pec3Peviewer",
-    stage10: &PEC3_PEVIEWER_STAGE10,
-    main_len: 2937,
 };
 
 const PEC3_HASH_SPEC: Pec3FamilySpec = Pec3FamilySpec {
     target_name: "Pec3Hash",
-    stage10: &PEC3_HASH_STAGE10,
-    main_len: 1756,
 };
 
 fn format_bytes(bytes: &[u8]) -> String {
@@ -168,29 +153,6 @@ fn initialize_worker_stream_stage(
     );
 
     Ok(())
-}
-
-fn read_entry_stub_prefix(qemu: &Qemu, want_len: usize) -> Result<Vec<u8>, Error> {
-    let a4: GuestAddr = qemu.read_reg(Regs::R9).unwrap().try_into().unwrap();
-    let rsp: GuestAddr = qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
-    let a5 = read_stack_arg_u64(qemu, rsp, 0x28)? as usize;
-
-    let read_len = want_len.min(a5);
-    let mut out = vec![0u8; want_len];
-    if read_len != 0 {
-        qemu.read_mem(a4, &mut out[..read_len])
-            .map_err(|e| Error::unknown(format!("Failed to read pec3 entry stub prefix: {e:?}")))?;
-    }
-    Ok(out)
-}
-
-fn fixed_stage(input: &[u8], offset: usize, len: usize) -> Vec<u8> {
-    let mut out = vec![0u8; len];
-    let available = input.len().saturating_sub(offset).min(len);
-    if available != 0 {
-        out[..available].copy_from_slice(&input[offset..offset + available]);
-    }
-    out
 }
 
 fn hit_family_seek(health: &UnpackerHealth, stage: u32) {
@@ -308,7 +270,7 @@ pub struct Pec3Read40Target {
     read_pc: Cell<GuestAddr>,
     read_count: Cell<u32>,
     health: UnpackerHealth,
-    stream: StagedReadStream,
+    stream: MemoryBackedStream,
 }
 
 impl Default for Pec3Read40Target {
@@ -318,9 +280,17 @@ impl Default for Pec3Read40Target {
             read_pc: Cell::new(0),
             read_count: Cell::new(0),
             health: UnpackerHealth::new("Pec3Read40", PEC3_HEALTH_SLOTS),
-            stream: StagedReadStream::default(),
+            stream: MemoryBackedStream::default(),
         }
     }
+}
+
+impl Pec3Read40Target {
+    const STREAM_LAYOUT: [StreamOverlay; 1] = [StreamOverlay {
+        input_offset: 0,
+        stream_offset: 0,
+        max_len: PEC3_MAX_STREAM_LEN,
+    }];
 }
 
 impl CevaTarget for Pec3Read40Target {
@@ -342,12 +312,10 @@ impl CevaTarget for Pec3Read40Target {
         initialize_worker_stream_stage(harness, seek_pc, read_pc, self.name())
     }
 
-    fn prepare_input(&self, qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
-        let final_input_len: usize = PEC3_STAGE40_LEN.min(input_len as usize);
-        let mut stages = Vec::with_capacity(2);
-        stages.push(input[..final_input_len].to_vec());
-        stages.push(read_entry_stub_prefix(qemu, PEC3_STAGE28_LEN)?);
-        self.stream.set_stages(stages);
+    fn prepare_input(&self, _qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
+        let final_input_len: usize = PEC3_MAX_STREAM_LEN.min(input_len as usize).min(input.len());
+        self.stream
+            .rebuild_with_overlays(&input[..final_input_len], &Self::STREAM_LAYOUT);
         Ok(())
     }
 
@@ -436,7 +404,7 @@ pub struct Pec3Read28Target {
     read_pc: Cell<GuestAddr>,
     read_count: Cell<u32>,
     health: UnpackerHealth,
-    stream: StagedReadStream,
+    stream: MemoryBackedStream,
 }
 
 impl Default for Pec3Read28Target {
@@ -446,9 +414,17 @@ impl Default for Pec3Read28Target {
             read_pc: Cell::new(0),
             read_count: Cell::new(0),
             health: UnpackerHealth::new("Pec3Read28", PEC3_HEALTH_SLOTS),
-            stream: StagedReadStream::default(),
+            stream: MemoryBackedStream::default(),
         }
     }
+}
+
+impl Pec3Read28Target {
+    const STREAM_LAYOUT: [StreamOverlay; 1] = [StreamOverlay {
+        input_offset: 0,
+        stream_offset: 0,
+        max_len: PEC3_MAX_STREAM_LEN,
+    }];
 }
 
 impl CevaTarget for Pec3Read28Target {
@@ -470,12 +446,10 @@ impl CevaTarget for Pec3Read28Target {
         initialize_worker_stream_stage(harness, seek_pc, read_pc, self.name())
     }
 
-    fn prepare_input(&self, qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
-        let final_input_len: usize = PEC3_STAGE28_LEN.min(input_len as usize);
-        let mut stages = Vec::with_capacity(2);
-        stages.push(read_entry_stub_prefix(qemu, PEC3_STAGE40_LEN)?);
-        stages.push(input[..final_input_len].to_vec());
-        self.stream.set_stages(stages);
+    fn prepare_input(&self, _qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
+        let final_input_len: usize = PEC3_MAX_STREAM_LEN.min(input_len as usize).min(input.len());
+        self.stream
+            .rebuild_with_overlays(&input[..final_input_len], &Self::STREAM_LAYOUT);
         Ok(())
     }
 
@@ -565,7 +539,7 @@ struct Pec3FamilyTarget {
     read_pc: Cell<GuestAddr>,
     read_count: Cell<u32>,
     health: UnpackerHealth,
-    stream: StagedReadStream,
+    stream: MemoryBackedStream,
 }
 
 impl Pec3FamilyTarget {
@@ -576,9 +550,17 @@ impl Pec3FamilyTarget {
             read_pc: Cell::new(0),
             read_count: Cell::new(0),
             health: UnpackerHealth::new(spec.target_name, PEC3_FAMILY_HEALTH_SLOTS),
-            stream: StagedReadStream::default(),
+            stream: MemoryBackedStream::default(),
         }
     }
+}
+
+impl Pec3FamilyTarget {
+    const STREAM_LAYOUT: [StreamOverlay; 1] = [StreamOverlay {
+        input_offset: 0,
+        stream_offset: 0,
+        max_len: PEC3_MAX_STREAM_LEN,
+    }];
 }
 
 impl CevaTarget for Pec3FamilyTarget {
@@ -600,16 +582,10 @@ impl CevaTarget for Pec3FamilyTarget {
         initialize_worker_stream_stage(harness, seek_pc, read_pc, self.name())
     }
 
-    fn prepare_input(&self, _qemu: &Qemu, input: &[u8], _input_len: GuestReg) -> Result<(), Error> {
-        let stage40 = fixed_stage(input, 0, PEC3_STAGE40_LEN);
-        let stage28 = fixed_stage(input, PEC3_STAGE40_LEN, PEC3_STAGE28_LEN);
-        let main = fixed_stage(
-            input,
-            PEC3_STAGE40_LEN + PEC3_STAGE28_LEN,
-            self.spec.main_len,
-        );
+    fn prepare_input(&self, _qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
+        let final_input_len: usize = PEC3_MAX_STREAM_LEN.min(input_len as usize).min(input.len());
         self.stream
-            .set_stages(vec![stage40, self.spec.stage10.to_vec(), stage28, main]);
+            .rebuild_with_overlays(&input[..final_input_len], &Self::STREAM_LAYOUT);
         Ok(())
     }
 

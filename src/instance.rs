@@ -34,6 +34,7 @@ use libafl_qemu::{
     Emulator, Qemu, QemuExecutor,
 };
 use std::{
+    collections::HashMap,
     fs,
     path::{Path, PathBuf},
     process,
@@ -41,11 +42,14 @@ use std::{
     time::{Duration, Instant},
 };
 
-use libafl_pe_mutator::{BytesToPeMutator, PeMutator, PeMutatorOptions, SectionBodyMutator};
+use libafl_pe_mutator::{
+    pe_manifest_hash_hex, write_pe_manifest_sidecar, BytesToPeMutator, PeInputManifestMetadata,
+    PeLibAflInput, PeMutator, PeMutatorOptions, SectionBodyMutator,
+};
 use libafl_targets::{edges_map_mut_ptr, EDGES_MAP_DEFAULT_SIZE, MAX_EDGES_FOUND};
 use pe_mutator_core::{
-    PeMutationCategory, PeMutationCategorySet, PeMutationKind, PeMutationSet, PeMutatorConfig,
-    StackDepthConfig,
+    pe::PeFile, AssemblyMutationMode, PeInputFingerprint, PeInputManifest, PeMutationCategory,
+    PeMutationCategorySet, PeMutationKind, PeMutationSet, PeMutatorConfig, StackDepthConfig,
 };
 use serde::{Deserialize, Serialize};
 
@@ -156,7 +160,7 @@ use crate::{
     harness::FuzzHarness,
     mutators::{
         havoc_fixed_size_mutations, BDCoreMutator, BeriaWorkbufMutator, MorphinepStreamMutator,
-        PelockStubMutator, UpackWindowMutator,
+        UpackWindowMutator,
     },
     options::FuzzerOptions,
     scan_profile::ScanProfile,
@@ -167,7 +171,15 @@ fn pe_mutator_config_from_options(options: &FuzzerOptions) -> PeMutatorConfig {
     let mut enabled_categories = PeMutationCategorySet::ALL;
     let mut enabled_mutations = PeMutationSet::ALL;
 
-    if options.pe_header
+    if options.pelock {
+        enabled_categories = PeMutationCategorySet::NONE;
+        enabled_mutations = PeMutationSet::NONE;
+        enabled_categories.insert(PeMutationCategory::Assembly);
+        enabled_mutations.insert(PeMutationKind::EntryPoint);
+        if options.assembly {
+            enabled_mutations.insert(PeMutationKind::ExecutableChunkAssembly);
+        }
+    } else if options.pe_header
         || options.sections
         || options.assembly
         || options.export_dir
@@ -212,7 +224,7 @@ fn pe_mutator_config_from_options(options: &FuzzerOptions) -> PeMutatorConfig {
         }
     }
 
-    PeMutatorConfig {
+    let mut config = PeMutatorConfig {
         stack: StackDepthConfig {
             min_stack_depth: options.pe_min_stack_depth,
             max_stack_depth: options.pe_max_stack_depth,
@@ -220,7 +232,14 @@ fn pe_mutator_config_from_options(options: &FuzzerOptions) -> PeMutatorConfig {
         enabled_categories,
         enabled_mutations,
         ..PeMutatorConfig::default()
+    };
+
+    if options.pelock {
+        config.assembly.assembly.mode = AssemblyMutationMode::Mixed;
+        config.assembly.assembly.budget.max_mutations = 2;
     }
+
+    config
 }
 
 fn pe_mutator_from_options(options: &FuzzerOptions) -> PeMutator {
@@ -308,6 +327,183 @@ where
                 testcase.add_metadata(SeedCorpusEntryMetadata);
             }
         }
+        Ok(())
+    }
+
+    fn manifest_matches_fingerprint(
+        manifest: &PeInputManifest,
+        fingerprint: &PeInputFingerprint,
+    ) -> bool {
+        manifest.version == PeInputManifest::MANIFEST_VERSION
+            && manifest.pe_fingerprint == *fingerprint
+    }
+
+    fn collect_pe_manifest_files(
+        root: &Path,
+        explicit_manifest_dir: bool,
+    ) -> Result<Vec<PathBuf>, Error> {
+        let mut files = Vec::new();
+        if !root.exists() {
+            return Ok(files);
+        }
+
+        let mut stack = vec![root.to_path_buf()];
+        while let Some(path) = stack.pop() {
+            let metadata = match fs::metadata(&path) {
+                Ok(metadata) => metadata,
+                Err(err) => {
+                    return Err(Error::illegal_argument(format!(
+                        "failed to stat PE manifest path {}: {err}",
+                        path.display()
+                    )));
+                }
+            };
+
+            if metadata.is_dir() {
+                for entry in fs::read_dir(&path).map_err(|err| {
+                    Error::illegal_argument(format!(
+                        "failed to read PE manifest directory {}: {err}",
+                        path.display()
+                    ))
+                })? {
+                    let entry = entry.map_err(|err| {
+                        Error::illegal_argument(format!(
+                            "failed to read PE manifest directory entry under {}: {err}",
+                            path.display()
+                        ))
+                    })?;
+                    stack.push(entry.path());
+                }
+                continue;
+            }
+
+            if !metadata.is_file() {
+                continue;
+            }
+
+            let Some(name) = path.file_name().and_then(|name| name.to_str()) else {
+                continue;
+            };
+            let is_manifest = if explicit_manifest_dir {
+                name.ends_with(".json")
+            } else {
+                name.ends_with(".pemutator.json") || name.ends_with(".manifest.json")
+            };
+            if is_manifest {
+                files.push(path);
+            }
+        }
+
+        Ok(files)
+    }
+
+    fn load_pe_manifests_from_roots(
+        roots: &[(PathBuf, bool)],
+    ) -> Result<HashMap<[u8; 32], PeInputManifest>, Error> {
+        let mut manifests = HashMap::new();
+
+        for (root, explicit_manifest_dir) in roots {
+            for path in Self::collect_pe_manifest_files(root, *explicit_manifest_dir)? {
+                let bytes = fs::read(&path).map_err(|err| {
+                    Error::illegal_argument(format!(
+                        "failed to read PE manifest {}: {err}",
+                        path.display()
+                    ))
+                })?;
+                let manifest =
+                    serde_json::from_slice::<PeInputManifest>(&bytes).map_err(|err| {
+                        Error::illegal_argument(format!(
+                            "failed to parse PE manifest {}: {err}",
+                            path.display()
+                        ))
+                    })?;
+                manifests.insert(manifest.pe_fingerprint.content_hash, manifest);
+            }
+        }
+
+        Ok(manifests)
+    }
+
+    fn pe_manifest_roots(&self) -> Vec<(PathBuf, bool)> {
+        let mut roots = Vec::new();
+        if let Some(input_dir) = self.options.input_dir() {
+            roots.push((input_dir.join(".pemutator"), true));
+            roots.push((input_dir, false));
+        }
+        if let Some(manifest_dir) = self.options.pe_manifest_dir() {
+            roots.push((manifest_dir, true));
+        }
+        roots
+    }
+
+    fn attach_pe_manifests_to_corpus(&self, state: &mut ClientState) -> Result<(), Error> {
+        let roots = self.pe_manifest_roots();
+        let manifests = Self::load_pe_manifests_from_roots(&roots)?;
+        if manifests.is_empty() {
+            println!("No PE mutator manifests found for imported seeds.");
+            return Ok(());
+        }
+
+        let mut attached = 0usize;
+        let mut stale = 0usize;
+        let ids = state.corpus().ids().collect::<Vec<_>>();
+
+        for id in ids {
+            let (bytes, file_path, already_has_manifest) = {
+                let testcase = state.corpus().get(id)?.borrow();
+                let bytes = if let Some(input) = testcase.input() {
+                    input.as_ref().to_vec()
+                } else if let Some(path) = testcase.file_path() {
+                    fs::read(path).map_err(|err| {
+                        Error::illegal_argument(format!(
+                            "failed to read corpus testcase {}: {err}",
+                            path.display()
+                        ))
+                    })?
+                } else {
+                    continue;
+                };
+                (
+                    bytes,
+                    testcase.file_path().clone(),
+                    testcase.has_metadata::<PeInputManifestMetadata>(),
+                )
+            };
+
+            if already_has_manifest {
+                continue;
+            }
+
+            let Ok(file) = PeFile::parse(&bytes) else {
+                continue;
+            };
+            let fingerprint = PeInputFingerprint::from_bytes_and_pe(&bytes, &file);
+            let Some(manifest) = manifests.get(&fingerprint.content_hash) else {
+                continue;
+            };
+
+            if !Self::manifest_matches_fingerprint(manifest, &fingerprint) {
+                stale += 1;
+                eprintln!(
+                    "Skipping stale PE manifest for corpus entry hash {}",
+                    pe_manifest_hash_hex(&fingerprint)
+                );
+                continue;
+            }
+
+            let mut testcase = state.corpus().get(id)?.borrow_mut();
+            testcase.add_metadata(PeInputManifestMetadata {
+                manifest: manifest.clone(),
+            });
+            if let Some(path) = file_path.as_deref() {
+                write_pe_manifest_sidecar(path, manifest)?;
+            }
+            attached += 1;
+        }
+
+        println!(
+            "Attached PE mutator manifests to {attached} imported corpus entries ({stale} stale manifests skipped)."
+        );
         Ok(())
     }
 
@@ -544,47 +740,64 @@ where
                 I2SRandReplace::new()
             )));
 
-            let power_mutator = if self.options.pe_mutator {
-                BDCoreMutator::Pe(pe_mutator_from_options(self.options))
-            } else if self.options.beria_vm {
-                BDCoreMutator::Beria(BeriaWorkbufMutator::default())
-            } else if self.options.morphinep {
-                BDCoreMutator::Morphinep(MorphinepStreamMutator::default())
-            } else if self.options.pelock {
-                BDCoreMutator::Pelock(PelockStubMutator::default())
-            } else if self.options.upack {
-                BDCoreMutator::Upack(UpackWindowMutator::default())
-            } else if self.options.fixed_size_mutations {
-                BDCoreMutator::MoptFixed(StdMOptMutator::new(
-                    &mut state,
-                    havoc_fixed_size_mutations(),
-                    7,
-                    5,
-                )?)
-            } else {
-                BDCoreMutator::Mopt(StdMOptMutator::new(
-                    &mut state,
-                    libafl::mutators::havoc_mutations(),
-                    7,
-                    5,
-                )?)
-            };
+            if self.options.uses_full_pe_mutator() {
+                let pe_stage =
+                    StdMutationalStage::<_, _, PeLibAflInput, BytesInput, _, _, _>::transforming(
+                        pe_mutator_from_options(self.options),
+                    );
 
-            let power: StdPowerMutationalStage<_, _, BytesInput, _, _, _> =
-                StdPowerMutationalStage::new(power_mutator);
-
-            // The order of the stages matter!
-
-            match self.options.sync_dir() {
-                Some(sync_dir) => {
-                    let sync_stage =
-                        SyncFromDiskStage::with_from_file(sync_dir, Duration::from_secs(5));
-                    let mut stages = tuple_list!(calibration, tracing, i2s, power, sync_stage);
-                    self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)
+                match self.options.sync_dir() {
+                    Some(sync_dir) => {
+                        let sync_stage =
+                            SyncFromDiskStage::with_from_file(sync_dir, Duration::from_secs(5));
+                        let mut stages =
+                            tuple_list!(calibration, tracing, i2s, pe_stage, sync_stage);
+                        self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)
+                    }
+                    None => {
+                        let mut stages = tuple_list!(calibration, tracing, i2s, pe_stage);
+                        self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)
+                    }
                 }
-                None => {
-                    let mut stages = tuple_list!(calibration, tracing, i2s, power);
-                    self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)
+            } else {
+                let power_mutator = if self.options.beria_vm {
+                    BDCoreMutator::Beria(BeriaWorkbufMutator::default())
+                } else if self.options.morphinep {
+                    BDCoreMutator::Morphinep(MorphinepStreamMutator::default())
+                } else if self.options.upack {
+                    BDCoreMutator::Upack(UpackWindowMutator::default())
+                } else if self.options.fixed_size_mutations {
+                    BDCoreMutator::MoptFixed(StdMOptMutator::new(
+                        &mut state,
+                        havoc_fixed_size_mutations(),
+                        7,
+                        5,
+                    )?)
+                } else {
+                    BDCoreMutator::Mopt(StdMOptMutator::new(
+                        &mut state,
+                        libafl::mutators::havoc_mutations(),
+                        7,
+                        5,
+                    )?)
+                };
+
+                let power: StdPowerMutationalStage<_, _, BytesInput, _, _, _> =
+                    StdPowerMutationalStage::new(power_mutator);
+
+                // The order of the stages matter!
+
+                match self.options.sync_dir() {
+                    Some(sync_dir) => {
+                        let sync_stage =
+                            SyncFromDiskStage::with_from_file(sync_dir, Duration::from_secs(5));
+                        let mut stages = tuple_list!(calibration, tracing, i2s, power, sync_stage);
+                        self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)
+                    }
+                    None => {
+                        let mut stages = tuple_list!(calibration, tracing, i2s, power);
+                        self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)
+                    }
                 }
             }
         } else {
@@ -612,17 +825,35 @@ where
                         Ok(self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)?)
                     }
                 }
-            } else if self.options.pe_mutator {
+            } else if self.options.uses_full_pe_mutator() {
                 let mutator = pe_mutator_from_options(self.options);
                 match self.options.sync_dir() {
                     Some(sync_dir) => {
                         let sync_stage =
                             SyncFromDiskStage::with_from_file(sync_dir, Duration::from_secs(5));
-                        let mut stages = tuple_list!(StdMutationalStage::new(mutator), sync_stage);
+                        let pe_stage = StdMutationalStage::<
+                            _,
+                            _,
+                            PeLibAflInput,
+                            BytesInput,
+                            _,
+                            _,
+                            _,
+                        >::transforming(mutator);
+                        let mut stages = tuple_list!(pe_stage, sync_stage);
                         Ok(self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)?)
                     }
                     None => {
-                        let mut stages = tuple_list!(StdMutationalStage::new(mutator));
+                        let pe_stage = StdMutationalStage::<
+                            _,
+                            _,
+                            PeLibAflInput,
+                            BytesInput,
+                            _,
+                            _,
+                            _,
+                        >::transforming(mutator);
+                        let mut stages = tuple_list!(pe_stage);
                         Ok(self.fuzz(&mut state, &mut fuzzer, &mut executor, &mut stages)?)
                     }
                 }
@@ -631,8 +862,6 @@ where
                     BDCoreMutator::Beria(BeriaWorkbufMutator::default())
                 } else if self.options.morphinep {
                     BDCoreMutator::Morphinep(MorphinepStreamMutator::default())
-                } else if self.options.pelock {
-                    BDCoreMutator::Pelock(PelockStubMutator::default())
                 } else if self.options.upack {
                     BDCoreMutator::Upack(UpackWindowMutator::default())
                 } else if self.options.fixed_size_mutations {
@@ -696,6 +925,9 @@ where
             }
             if self.options.only_seeds {
                 Self::tag_current_corpus_as_seed(state)?;
+            }
+            if self.options.uses_full_pe_mutator() {
+                self.attach_pe_manifests_to_corpus(state)?;
             }
             println!("We imported {} inputs from disk.", state.corpus().count());
         }
@@ -799,6 +1031,20 @@ mod tests {
 
         assert_eq!(config.stack.min_stack_depth, 3);
         assert_eq!(config.stack.max_stack_depth, 6);
+    }
+
+    #[test]
+    fn pelock_uses_entrypoint_only_with_two_asm_mutations() {
+        let mut options = base_options();
+        options.pelock = true;
+        options.pe_mutator = false;
+
+        let config = pe_mutator_config_from_options(&options);
+
+        assert!(config.is_category_enabled(PeMutationCategory::Assembly));
+        assert!(config.is_mutation_enabled(PeMutationKind::EntryPoint));
+        assert!(!config.is_mutation_enabled(PeMutationKind::ExecutableChunkAssembly));
+        assert_eq!(config.assembly.assembly.budget.max_mutations, 2);
     }
 
     #[test]

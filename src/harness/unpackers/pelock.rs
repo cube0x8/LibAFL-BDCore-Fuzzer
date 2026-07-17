@@ -1,22 +1,37 @@
 use std::cell::{Cell, RefCell};
 
 use libafl::Error;
-use libafl_qemu::{GuestAddr, GuestReg, Qemu, Regs};
+use libafl_qemu::{GuestAddr, GuestReg, MmapPerms, Qemu, Regs};
+use pe_mutator_core::pe::PeFile;
 
 use crate::harness::unpackers::health::UnpackerHealth;
 use crate::harness::unpackers::stream::{MemoryBackedStream, StreamOverlay};
 use crate::harness::{CevaEmuHarness, CevaTarget};
 
-const PELOCK_SEEK_THUNK_OFFSET: GuestAddr = 0xd4c0;
-const PELOCK_READ_THUNK_OFFSET: GuestAddr = 0xd4d0;
-const PELOCK_07D60_CALLSITE_OFFSET: GuestAddr = 0x520e;
-const PELOCK_STAGE0_STREAM_OFFSET: usize = 0x400;
-const PELOCK_STREAM_LEN: usize = 0x3a00;
-const PELOCK_STUB_PREFIX_LEN: usize = 10;
-const PELOCK_07D60_WINDOW_LEN: usize = 0xab;
+const PELOCK_SEEK_THUNK_OFFSET: GuestAddr = 0x74c0;
+const PELOCK_READ_THUNK_OFFSET: GuestAddr = 0x74d0;
+const PELOCK_DECODER_CALL_OFFSET: GuestAddr = 0xb2a;
+const PELOCK_DECODER_RETURN_OFFSET: GuestAddr = 0xb2f;
+const PELOCK_DECODER_FREE_CALL_OFFSET: GuestAddr = 0xb56;
+const PELOCK_DECODER_FREE_RETURN_OFFSET: GuestAddr = 0xb5b;
+const PELOCK_SECOND_PARSE_CALL_OFFSET: GuestAddr = 0x51be;
+const PELOCK_SECOND_PARSE_RETURN_OFFSET: GuestAddr = 0x51c3;
+const PELOCK_POST_073F0_OFFSET: GuestAddr = 0x52b9;
+const PELOCK_POST_073F0_GATES_OFFSET: GuestAddr = 0x52cd;
+const PELOCK_POST_073F0_LOOP_OFFSET: GuestAddr = 0x52e0;
+const PELOCK_POST_073F0_FAIL_OFFSET: GuestAddr = 0x56f7;
+const PELOCK_FIRST_08180_RETURN_OFFSET: GuestAddr = 0x538b;
+const PELOCK_SECOND_08180_RETURN_OFFSET: GuestAddr = 0x54b0;
+const PELOCK_06E40_RETURN_OFFSET: GuestAddr = 0x555f;
+const PELOCK_ENTRY_STUB_LEN: usize = 4096;
 const PELOCK_STUB_IMM1_OFFSET: GuestAddr = 0x1;
 const PELOCK_STUB_IMM2_OFFSET: GuestAddr = 0x6;
 const PELOCK_STUB_IMM2_VALUE: u32 = 0x200;
+
+const DECODED_DESCRIPTOR_ENCODED_PAYLOAD_OFFSET: GuestAddr = 0x00;
+const DECODED_DESCRIPTOR_DECODED_PAYLOAD_OFFSET: GuestAddr = 0x08;
+const DECODED_DESCRIPTOR_ENCODED_SIZE_OFFSET: GuestAddr = 0x10;
+const DECODED_DESCRIPTOR_DECODED_SIZE_HIGH_OFFSET: GuestAddr = 0x1c;
 
 const SLOT_STAGE0_SEEK: usize = 0;
 const SLOT_STAGE0_READ: usize = 1;
@@ -30,6 +45,7 @@ const SLOT_STAGE4_SEEK: usize = 8;
 const SLOT_STAGE4_READ: usize = 9;
 const SLOT_STAGE5_ZERO: usize = 10;
 const SLOT_COMPLETED: usize = 11;
+const SLOT_DECODED_STAGE_INJECTED: usize = 12;
 
 const PELOCK_HEALTH_SLOTS: &[&str] = &[
     "stage0_seek",
@@ -44,6 +60,7 @@ const PELOCK_HEALTH_SLOTS: &[&str] = &[
     "stage4_read",
     "stage5_zero",
     "completed",
+    "decoded_stage_injected",
 ];
 
 fn restore_nonvolatile_regs(harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
@@ -72,14 +89,29 @@ fn restore_nonvolatile_regs(harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
 pub struct PelockTarget {
     seek_pc: Cell<GuestAddr>,
     read_pc: Cell<GuestAddr>,
-    call_07d60_pc: Cell<GuestAddr>,
+    decoder_call_pc: Cell<GuestAddr>,
+    decoder_return_pc: Cell<GuestAddr>,
+    decoder_free_call_pc: Cell<GuestAddr>,
+    decoder_free_return_pc: Cell<GuestAddr>,
+    second_parse_call_pc: Cell<GuestAddr>,
+    second_parse_return_pc: Cell<GuestAddr>,
+    post_073f0_pc: Cell<GuestAddr>,
+    post_073f0_gates_pc: Cell<GuestAddr>,
+    post_073f0_loop_pc: Cell<GuestAddr>,
+    post_073f0_fail_pc: Cell<GuestAddr>,
+    first_08180_return_pc: Cell<GuestAddr>,
+    second_08180_return_pc: Cell<GuestAddr>,
+    return_06e40_pc: Cell<GuestAddr>,
+    diagnostic_trace: Cell<bool>,
+    decoder_scratch: Cell<GuestAddr>,
+    decoder_scratch_len: Cell<usize>,
     read_count: Cell<u32>,
     has_stub_override: Cell<bool>,
+    stub_len: Cell<usize>,
     health: UnpackerHealth,
     stream: MemoryBackedStream,
-    stub_prefix: RefCell<[u8; PELOCK_STUB_PREFIX_LEN]>,
-    window_override: RefCell<[u8; PELOCK_07D60_WINDOW_LEN]>,
-    has_window_override: Cell<bool>,
+    baseline_entry_stub: RefCell<[u8; PELOCK_ENTRY_STUB_LEN]>,
+    entry_stub: RefCell<[u8; PELOCK_ENTRY_STUB_LEN]>,
 }
 
 impl Default for PelockTarget {
@@ -87,25 +119,34 @@ impl Default for PelockTarget {
         Self {
             seek_pc: Cell::new(0),
             read_pc: Cell::new(0),
-            call_07d60_pc: Cell::new(0),
+            decoder_call_pc: Cell::new(0),
+            decoder_return_pc: Cell::new(0),
+            decoder_free_call_pc: Cell::new(0),
+            decoder_free_return_pc: Cell::new(0),
+            second_parse_call_pc: Cell::new(0),
+            second_parse_return_pc: Cell::new(0),
+            post_073f0_pc: Cell::new(0),
+            post_073f0_gates_pc: Cell::new(0),
+            post_073f0_loop_pc: Cell::new(0),
+            post_073f0_fail_pc: Cell::new(0),
+            first_08180_return_pc: Cell::new(0),
+            second_08180_return_pc: Cell::new(0),
+            return_06e40_pc: Cell::new(0),
+            diagnostic_trace: Cell::new(false),
+            decoder_scratch: Cell::new(0),
+            decoder_scratch_len: Cell::new(0),
             read_count: Cell::new(0),
             has_stub_override: Cell::new(false),
+            stub_len: Cell::new(PELOCK_ENTRY_STUB_LEN),
             health: UnpackerHealth::new("Pelock", PELOCK_HEALTH_SLOTS),
             stream: MemoryBackedStream::default(),
-            stub_prefix: RefCell::new([0; PELOCK_STUB_PREFIX_LEN]),
-            window_override: RefCell::new([0; PELOCK_07D60_WINDOW_LEN]),
-            has_window_override: Cell::new(false),
+            baseline_entry_stub: RefCell::new([0; PELOCK_ENTRY_STUB_LEN]),
+            entry_stub: RefCell::new([0; PELOCK_ENTRY_STUB_LEN]),
         }
     }
 }
 
 impl PelockTarget {
-    const STREAM_LAYOUT: [StreamOverlay; 1] = [StreamOverlay {
-        input_offset: 0,
-        stream_offset: PELOCK_STAGE0_STREAM_OFFSET,
-        max_len: PELOCK_STREAM_LEN,
-    }];
-
     fn seek_slot(read_index: u32) -> Option<usize> {
         match read_index {
             0 => Some(SLOT_STAGE0_SEEK),
@@ -139,9 +180,69 @@ impl CevaTarget for PelockTarget {
         harness: &mut CevaEmuHarness<'_>,
         _max_bp_hit_count: Option<u64>,
     ) -> Result<(), Error> {
-        let seek_pc = harness.entry_point + PELOCK_SEEK_THUNK_OFFSET;
-        let read_pc = harness.entry_point + PELOCK_READ_THUNK_OFFSET;
-        let call_07d60_pc = harness.entry_point + PELOCK_07D60_CALLSITE_OFFSET;
+        let resolve_pc = |offset: GuestAddr, kind: &str| {
+            harness
+                .bd_engine
+                .resolve_module_address(&format!("pelock.xmd:+{offset:#x}"), kind)
+        };
+        let seek_pc = resolve_pc(PELOCK_SEEK_THUNK_OFFSET, "Pelock seek hook")?;
+        let read_pc = resolve_pc(PELOCK_READ_THUNK_OFFSET, "Pelock read hook")?;
+        let decoder_call_pc = resolve_pc(PELOCK_DECODER_CALL_OFFSET, "Pelock decoder call hook")?;
+        let decoder_return_pc = resolve_pc(PELOCK_DECODER_RETURN_OFFSET, "Pelock decoder return")?;
+        let decoder_free_call_pc = resolve_pc(
+            PELOCK_DECODER_FREE_CALL_OFFSET,
+            "Pelock decoder cleanup hook",
+        )?;
+        let decoder_free_return_pc = resolve_pc(
+            PELOCK_DECODER_FREE_RETURN_OFFSET,
+            "Pelock decoder cleanup return",
+        )?;
+        let diagnostic_trace = std::env::var_os("PELOCK_DIAGNOSTIC_TRACE").is_some();
+        let second_parse_call_pc = if diagnostic_trace {
+            resolve_pc(PELOCK_SECOND_PARSE_CALL_OFFSET, "Pelock second parser call")?
+        } else {
+            0
+        };
+        let second_parse_return_pc = if diagnostic_trace {
+            resolve_pc(PELOCK_SECOND_PARSE_RETURN_OFFSET, "Pelock second parser return")?
+        } else {
+            0
+        };
+        let post_073f0_pc = if diagnostic_trace {
+            resolve_pc(PELOCK_POST_073F0_OFFSET, "Pelock post-073F0 return")?
+        } else {
+            0
+        };
+        let post_073f0_gates_pc = if diagnostic_trace {
+            resolve_pc(PELOCK_POST_073F0_GATES_OFFSET, "Pelock post-073F0 gates passed")?
+        } else {
+            0
+        };
+        let post_073f0_loop_pc = if diagnostic_trace {
+            resolve_pc(PELOCK_POST_073F0_LOOP_OFFSET, "Pelock post-073F0 loop")?
+        } else {
+            0
+        };
+        let post_073f0_fail_pc = if diagnostic_trace {
+            resolve_pc(PELOCK_POST_073F0_FAIL_OFFSET, "Pelock post-073F0 failure")?
+        } else {
+            0
+        };
+        let first_08180_return_pc = if diagnostic_trace {
+            resolve_pc(PELOCK_FIRST_08180_RETURN_OFFSET, "Pelock first 08180 return")?
+        } else {
+            0
+        };
+        let second_08180_return_pc = if diagnostic_trace {
+            resolve_pc(PELOCK_SECOND_08180_RETURN_OFFSET, "Pelock second 08180 return")?
+        } else {
+            0
+        };
+        let return_06e40_pc = if diagnostic_trace {
+            resolve_pc(PELOCK_06E40_RETURN_OFFSET, "Pelock 06E40 return")?
+        } else {
+            0
+        };
         let stub_buf: GuestAddr = harness
             .qemu()
             .read_reg(Regs::R9)
@@ -151,93 +252,262 @@ impl CevaTarget for PelockTarget {
 
         self.seek_pc.set(seek_pc);
         self.read_pc.set(read_pc);
-        self.call_07d60_pc.set(call_07d60_pc);
+        self.decoder_call_pc.set(decoder_call_pc);
+        self.decoder_return_pc.set(decoder_return_pc);
+        self.decoder_free_call_pc.set(decoder_free_call_pc);
+        self.decoder_free_return_pc.set(decoder_free_return_pc);
+        self.second_parse_call_pc.set(second_parse_call_pc);
+        self.second_parse_return_pc.set(second_parse_return_pc);
+        self.post_073f0_pc.set(post_073f0_pc);
+        self.post_073f0_gates_pc.set(post_073f0_gates_pc);
+        self.post_073f0_loop_pc.set(post_073f0_loop_pc);
+        self.post_073f0_fail_pc.set(post_073f0_fail_pc);
+        self.first_08180_return_pc.set(first_08180_return_pc);
+        self.second_08180_return_pc.set(second_08180_return_pc);
+        self.return_06e40_pc.set(return_06e40_pc);
+        self.diagnostic_trace.set(diagnostic_trace);
 
-        let mut stub_prefix = [0u8; PELOCK_STUB_PREFIX_LEN];
+        let decoder_scratch_len = harness.max_target_input_size();
+        let decoder_scratch = harness
+            .qemu()
+            .map_private(0, decoder_scratch_len, MmapPerms::ReadWrite)
+            .map_err(|e| Error::unknown(format!("Failed to map Pelock decoder scratch: {e}")))?;
+        self.decoder_scratch.set(decoder_scratch);
+        self.decoder_scratch_len.set(decoder_scratch_len);
+
+        let mut entry_stub = [0u8; PELOCK_ENTRY_STUB_LEN];
         harness
             .qemu()
-            .read_mem(stub_buf, &mut stub_prefix)
-            .map_err(|e| Error::unknown(format!("Failed to snapshot Pelock stub prefix: {e:?}")))?;
-        *self.stub_prefix.borrow_mut() = stub_prefix;
+            .read_mem(stub_buf, &mut entry_stub)
+            .map_err(|e| Error::unknown(format!("Failed to snapshot Pelock entry stub: {e:?}")))?;
+        *self.baseline_entry_stub.borrow_mut() = entry_stub;
+        *self.entry_stub.borrow_mut() = entry_stub;
+        self.stub_len.set(PELOCK_ENTRY_STUB_LEN);
 
         harness.qemu().set_breakpoint(seek_pc);
         harness.qemu().set_breakpoint(read_pc);
-        harness.qemu().set_breakpoint(call_07d60_pc);
+        harness.qemu().set_breakpoint(decoder_call_pc);
+        harness.qemu().set_breakpoint(decoder_free_call_pc);
+        if diagnostic_trace {
+            harness.qemu().set_breakpoint(second_parse_call_pc);
+            harness.qemu().set_breakpoint(second_parse_return_pc);
+            harness.qemu().set_breakpoint(post_073f0_pc);
+            harness.qemu().set_breakpoint(post_073f0_gates_pc);
+            harness.qemu().set_breakpoint(post_073f0_loop_pc);
+            harness.qemu().set_breakpoint(post_073f0_fail_pc);
+            harness.qemu().set_breakpoint(first_08180_return_pc);
+            harness.qemu().set_breakpoint(second_08180_return_pc);
+            harness.qemu().set_breakpoint(return_06e40_pc);
+        }
 
         log::debug!(
-            "Pelock init: worker={:#x} seek_hook={seek_pc:#x} read_hook={read_pc:#x}",
+            "Pelock init: worker={:#x} seek_hook={seek_pc:#x} read_hook={read_pc:#x} decoder_hook={decoder_call_pc:#x} decoder_scratch={decoder_scratch:#x}:{decoder_scratch_len:#x}",
             harness.entry_point,
         );
 
         Ok(())
     }
 
-    fn prepare_input(&self, _qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
+    fn prepare_input(&self, qemu: &Qemu, input: &[u8], input_len: GuestReg) -> Result<(), Error> {
         let total_len = (input_len as usize).min(input.len());
-        let prefixed_stream_len = PELOCK_STUB_PREFIX_LEN + PELOCK_STREAM_LEN;
-        let full_prefixed_len = prefixed_stream_len + PELOCK_07D60_WINDOW_LEN;
+        let input = &input[..total_len];
 
-        let (stub_prefix, stream_input, window_override) = if total_len >= full_prefixed_len {
-            (
-                &input[..PELOCK_STUB_PREFIX_LEN],
-                &input[PELOCK_STUB_PREFIX_LEN..prefixed_stream_len],
-                Some(&input[prefixed_stream_len..full_prefixed_len]),
-            )
-        } else if total_len > PELOCK_STREAM_LEN {
-            let stub_end = PELOCK_STUB_PREFIX_LEN.min(total_len);
-            (&input[..stub_end], &input[stub_end..total_len], None)
-        } else {
-            (&[][..], &input[..total_len], None)
+        let stream_overlay = StreamOverlay {
+            input_offset: 0,
+            stream_offset: 0,
+            max_len: input.len(),
         };
+        self.stream.rebuild_with_overlays(input, &[stream_overlay]);
+        self.has_stub_override.set(false);
 
-        if !stub_prefix.is_empty() {
-            let mut patched_prefix = *self.stub_prefix.borrow();
-            let copy_len = patched_prefix.len().min(stub_prefix.len());
-            patched_prefix[..copy_len].copy_from_slice(&stub_prefix[..copy_len]);
-            *self.stub_prefix.borrow_mut() = patched_prefix;
-            self.has_stub_override.set(true);
-        } else {
-            self.has_stub_override.set(false);
+        let mut patched_stub = *self.baseline_entry_stub.borrow();
+        let mut stub_len = PELOCK_ENTRY_STUB_LEN;
+
+        match PeFile::parse(input) {
+            Ok(file) => match file.entry_bytes(Some(PELOCK_ENTRY_STUB_LEN)) {
+                Some(entry_bytes) if !entry_bytes.is_empty() => {
+                    stub_len = patched_stub.len().min(entry_bytes.len());
+                    patched_stub[..stub_len].copy_from_slice(&entry_bytes[..stub_len]);
+                    self.has_stub_override.set(true);
+
+                    if stub_len < PELOCK_ENTRY_STUB_LEN {
+                        log::debug!(
+                            "Pelock prepare_input: copied short PE entry stub ({stub_len}/{PELOCK_ENTRY_STUB_LEN} bytes)"
+                        );
+                    } else {
+                        log::debug!(
+                            "Pelock prepare_input: copied PE entry stub into R9 injection buffer"
+                        );
+                    }
+                }
+                Some(_) => {
+                    log::debug!("Pelock prepare_input: PE entry-point byte slice is empty");
+                }
+                None => {
+                    log::debug!(
+                        "Pelock prepare_input: PE entry point does not resolve to raw bytes; using runtime stub"
+                    );
+                }
+            },
+            Err(_) => {
+                log::debug!(
+                    "Pelock prepare_input: input is not a parseable PE; using runtime stub"
+                );
+            }
         }
 
-        if let Some(window_override) = window_override {
-            let mut patched_window = [0u8; PELOCK_07D60_WINDOW_LEN];
-            patched_window.copy_from_slice(window_override);
-            *self.window_override.borrow_mut() = patched_window;
-            self.has_window_override.set(true);
-        } else {
-            self.has_window_override.set(false);
+        if !self.has_stub_override.get() {
+            let r12: u32 = qemu
+                .read_reg(Regs::R12)
+                .unwrap()
+                .try_into()
+                .unwrap_or_default();
+            let out_va = r12.wrapping_add(0x100);
+            patched_stub[PELOCK_STUB_IMM1_OFFSET as usize..PELOCK_STUB_IMM1_OFFSET as usize + 4]
+                .copy_from_slice(&out_va.to_le_bytes());
+            patched_stub[PELOCK_STUB_IMM2_OFFSET as usize..PELOCK_STUB_IMM2_OFFSET as usize + 4]
+                .copy_from_slice(&PELOCK_STUB_IMM2_VALUE.to_le_bytes());
         }
 
-        let final_input_len = PELOCK_STREAM_LEN.min(stream_input.len());
-        self.stream
-            .rebuild_with_overlays(&stream_input[..final_input_len], &Self::STREAM_LAYOUT);
+        *self.entry_stub.borrow_mut() = patched_stub;
+        self.stub_len.set(stub_len);
+
+        let stub_buf: GuestAddr = qemu
+            .read_reg(Regs::R9)
+            .map_err(|e| Error::unknown(format!("Failed to read Pelock R9 stub pointer: {e:?}")))?
+            .try_into()
+            .map_err(|e| Error::unknown(format!("Invalid Pelock R9 stub pointer: {e:?}")))?;
+        qemu.write_mem(stub_buf, &patched_stub[..stub_len])
+            .map_err(|e| Error::unknown(format!("Failed to patch Pelock entry stub: {e:?}")))?;
+
         Ok(())
     }
 
     fn reset(&self, harness: &CevaEmuHarness<'_>) -> Result<(), Error> {
         restore_nonvolatile_regs(harness)?;
         self.stream.reset();
-        let mut patched_prefix = *self.stub_prefix.borrow();
-        if !self.has_stub_override.get() {
-            let out_va = (harness.r12 as u32).wrapping_add(0x100);
-            patched_prefix[PELOCK_STUB_IMM1_OFFSET as usize..PELOCK_STUB_IMM1_OFFSET as usize + 4]
-                .copy_from_slice(&out_va.to_le_bytes());
-            patched_prefix[PELOCK_STUB_IMM2_OFFSET as usize..PELOCK_STUB_IMM2_OFFSET as usize + 4]
-                .copy_from_slice(&PELOCK_STUB_IMM2_VALUE.to_le_bytes());
-        }
-        harness
-            .qemu()
-            .write_mem(harness.r9, &patched_prefix)
-            .map_err(|e| Error::unknown(format!("Failed to patch Pelock stub prefix: {e:?}")))?;
         self.read_count.set(0);
         self.health.reset_run();
+        if self.diagnostic_trace.get() {
+            harness
+                .qemu()
+                .set_breakpoint(self.second_parse_call_pc.get());
+            harness
+                .qemu()
+                .set_breakpoint(self.second_parse_return_pc.get());
+            harness.qemu().set_breakpoint(self.post_073f0_pc.get());
+            harness
+                .qemu()
+                .set_breakpoint(self.post_073f0_gates_pc.get());
+            harness
+                .qemu()
+                .set_breakpoint(self.post_073f0_loop_pc.get());
+            harness
+                .qemu()
+                .set_breakpoint(self.post_073f0_fail_pc.get());
+            harness
+                .qemu()
+                .set_breakpoint(self.first_08180_return_pc.get());
+            harness
+                .qemu()
+                .set_breakpoint(self.second_08180_return_pc.get());
+            harness.qemu().set_breakpoint(self.return_06e40_pc.get());
+        }
         Ok(())
     }
 
     fn handle_breakpoint(&self, harness: &CevaEmuHarness<'_>) -> Result<bool, Error> {
         let qemu = harness.qemu();
         let pc: GuestAddr = qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+
+        if self.diagnostic_trace.get() && pc == self.second_parse_call_pc.get() {
+            let base: GuestAddr = qemu.read_reg(Regs::Rcx).unwrap().try_into().unwrap();
+            let cursor: usize = qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
+            let max_len: usize = qemu.read_reg(Regs::R8).unwrap().try_into().unwrap();
+            let expected: u64 = qemu.read_reg(Regs::R9).unwrap().try_into().unwrap();
+            let mut window = [0u8; 80];
+            qemu.read_mem(base + cursor as GuestAddr, &mut window)
+                .map_err(|e| Error::unknown(format!("Failed to read Pelock parser window: {e:?}")))?;
+            eprintln!(
+                "PELOCK_DIAG second_parse_call rcx={base:#x} cursor={cursor:#x} max_len={max_len:#x} expected={expected:#x} window={}",
+                window
+                    .iter()
+                    .map(|byte| format!("{byte:02x}"))
+                    .collect::<Vec<_>>()
+                    .join(" ")
+            );
+            qemu.remove_breakpoint(self.second_parse_call_pc.get());
+            return Ok(true);
+        }
+
+        if self.diagnostic_trace.get() && pc == self.second_parse_return_pc.get() {
+            let result: u32 = qemu.read_reg(Regs::Rax).unwrap().try_into().unwrap();
+            eprintln!(
+                "PELOCK_DIAG second_parse_return eax={result:#x} signed={}",
+                result as i32
+            );
+            qemu.remove_breakpoint(self.second_parse_return_pc.get());
+            return Ok(true);
+        }
+
+        if self.diagnostic_trace.get() && pc == self.post_073f0_pc.get() {
+            let result: u32 = qemu.read_reg(Regs::Rax).unwrap().try_into().unwrap();
+            let decoded_size: u32 = qemu.read_reg(Regs::R13).unwrap().try_into().unwrap();
+            eprintln!(
+                "PELOCK_DIAG post_073f0 eax={result:#x} signed={} decoded_size={decoded_size:#x}",
+                result as i32
+            );
+            qemu.remove_breakpoint(self.post_073f0_pc.get());
+            return Ok(true);
+        }
+
+        if self.diagnostic_trace.get() && pc == self.post_073f0_gates_pc.get() {
+            eprintln!("PELOCK_DIAG post_073f0_initial_gates=passed");
+            qemu.remove_breakpoint(self.post_073f0_gates_pc.get());
+            return Ok(true);
+        }
+
+        if self.diagnostic_trace.get() && pc == self.post_073f0_loop_pc.get() {
+            let cursor: u32 = qemu.read_reg(Regs::Rdi).unwrap().try_into().unwrap();
+            let decoded_size: u32 = qemu.read_reg(Regs::R13).unwrap().try_into().unwrap();
+            eprintln!(
+                "PELOCK_DIAG post_073f0_loop cursor={cursor:#x} decoded_size={decoded_size:#x}"
+            );
+            qemu.remove_breakpoint(self.post_073f0_loop_pc.get());
+            return Ok(true);
+        }
+
+        if self.diagnostic_trace.get() && pc == self.post_073f0_fail_pc.get() {
+            let result = qemu.read_reg(Regs::R12).unwrap() as u32;
+            let decoded_size = qemu.read_reg(Regs::R13).unwrap() as u32;
+            let cursor = qemu.read_reg(Regs::Rdi).unwrap() as u32;
+            eprintln!(
+                "PELOCK_DIAG post_073f0_fail result={result:#x} decoded_size={decoded_size:#x} cursor={cursor:#x}"
+            );
+            qemu.remove_breakpoint(self.post_073f0_fail_pc.get());
+            return Ok(true);
+        }
+
+        if self.diagnostic_trace.get() && pc == self.first_08180_return_pc.get() {
+            let result = qemu.read_reg(Regs::Rax).unwrap() as u32;
+            eprintln!("PELOCK_DIAG first_08180_return eax={result:#x} signed={}", result as i32);
+            qemu.remove_breakpoint(self.first_08180_return_pc.get());
+            return Ok(true);
+        }
+
+        if self.diagnostic_trace.get() && pc == self.second_08180_return_pc.get() {
+            let result = qemu.read_reg(Regs::Rax).unwrap() as u32;
+            eprintln!("PELOCK_DIAG second_08180_return eax={result:#x} signed={}", result as i32);
+            qemu.remove_breakpoint(self.second_08180_return_pc.get());
+            return Ok(true);
+        }
+
+        if self.diagnostic_trace.get() && pc == self.return_06e40_pc.get() {
+            let result = qemu.read_reg(Regs::Rax).unwrap() as u32;
+            eprintln!("PELOCK_DIAG 06e40_return eax={result:#x} signed={}", result as i32);
+            qemu.remove_breakpoint(self.return_06e40_pc.get());
+            return Ok(true);
+        }
 
         if pc == self.seek_pc.get() {
             if harness.health_signals_enabled() {
@@ -271,20 +541,105 @@ impl CevaTarget for PelockTarget {
             return Ok(true);
         }
 
-        if pc == self.call_07d60_pc.get() {
-            if self.has_window_override.get() {
-                let rcx: GuestAddr = qemu.read_reg(Regs::Rcx).unwrap().try_into().unwrap_or(0);
-                let rdx: u64 = qemu.read_reg(Regs::Rdx).unwrap_or(0);
-                let capture_start = (rdx as u32).saturating_sub(0x10) as GuestAddr;
-                let guest_addr = rcx.saturating_add(capture_start);
-                let patched_window = *self.window_override.borrow();
-                qemu.write_mem(guest_addr, &patched_window).map_err(|e| {
+        if pc == self.decoder_call_pc.get() {
+            let descriptor: GuestAddr = qemu
+                .read_reg(Regs::Rcx)
+                .map_err(|e| {
+                    Error::unknown(format!("Failed to read Pelock decoder descriptor: {e:?}"))
+                })?
+                .try_into()
+                .map_err(|e| Error::unknown(format!("Invalid Pelock decoder descriptor: {e:?}")))?;
+            let max_decoded_size: usize = qemu
+                .read_reg(Regs::Rdi)
+                .map_err(|e| {
+                    Error::unknown(format!("Failed to read Pelock decoder capacity: {e:?}"))
+                })?
+                .try_into()
+                .unwrap_or(usize::MAX);
+
+            let mut encoded_payload_bytes = [0u8; 8];
+            let mut encoded_size_bytes = [0u8; 4];
+            qemu.read_mem(
+                descriptor + DECODED_DESCRIPTOR_ENCODED_PAYLOAD_OFFSET,
+                &mut encoded_payload_bytes,
+            )
+            .map_err(|e| {
+                Error::unknown(format!(
+                    "Failed to read Pelock encoded payload pointer: {e:?}"
+                ))
+            })?;
+            qemu.read_mem(
+                descriptor + DECODED_DESCRIPTOR_ENCODED_SIZE_OFFSET,
+                &mut encoded_size_bytes,
+            )
+            .map_err(|e| {
+                Error::unknown(format!("Failed to read Pelock encoded payload size: {e:?}"))
+            })?;
+
+            let encoded_payload: GuestAddr = u64::from_le_bytes(encoded_payload_bytes)
+                .try_into()
+                .map_err(|e| {
+                Error::unknown(format!("Invalid Pelock encoded payload pointer: {e:?}"))
+            })?;
+            let encoded_size = u32::from_le_bytes(encoded_size_bytes) as usize;
+            let decoded_size = max_decoded_size
+                .saturating_sub(1)
+                .min(encoded_size)
+                .min(self.decoder_scratch_len.get());
+            let decoder_scratch = self.decoder_scratch.get();
+
+            if decoded_size != 0 {
+                let mut decoded = vec![0u8; decoded_size];
+                qemu.read_mem(encoded_payload, &mut decoded).map_err(|e| {
                     Error::unknown(format!(
-                        "Failed to patch Pelock 07D60 callsite window at {guest_addr:#x}: {e:?}"
+                        "Failed to read Pelock manifest-selected decoded region at {encoded_payload:#x}: {e:?}"
+                    ))
+                })?;
+                qemu.write_mem(decoder_scratch, &decoded).map_err(|e| {
+                    Error::unknown(format!(
+                        "Failed to write Pelock decoder scratch at {decoder_scratch:#x}: {e:?}"
                     ))
                 })?;
             }
-            return Ok(false);
+
+            qemu.write_mem(
+                descriptor + DECODED_DESCRIPTOR_DECODED_PAYLOAD_OFFSET,
+                &decoder_scratch.to_le_bytes(),
+            )
+            .map_err(|e| {
+                Error::unknown(format!(
+                    "Failed to set Pelock decoded payload pointer: {e:?}"
+                ))
+            })?;
+            qemu.write_mem(
+                descriptor + DECODED_DESCRIPTOR_DECODED_SIZE_HIGH_OFFSET,
+                &(decoded_size as u32).to_le_bytes(),
+            )
+            .map_err(|e| {
+                Error::unknown(format!("Failed to set Pelock decoded payload size: {e:?}"))
+            })?;
+            qemu.write_reg(
+                Regs::Pc,
+                GuestReg::try_from(self.decoder_return_pc.get()).unwrap(),
+            )
+            .map_err(|e| Error::unknown(format!("Failed to skip Pelock decoder call: {e:?}")))?;
+            if harness.health_signals_enabled() {
+                self.health.hit(SLOT_DECODED_STAGE_INJECTED);
+            }
+            return Ok(true);
+        }
+
+        if pc == self.decoder_free_call_pc.get() {
+            qemu.write_reg(
+                Regs::Pc,
+                GuestReg::try_from(self.decoder_free_return_pc.get()).unwrap(),
+            )
+            .map_err(|e| {
+                Error::unknown(format!(
+                    "Failed to skip Pelock decoder scratch cleanup: {e:?}"
+                ))
+            })?;
+            return Ok(true);
         }
 
         Ok(false)

@@ -21,18 +21,6 @@ pub struct MemoryBackedStream {
     state: RefCell<MemoryBackedStreamState>,
 }
 
-#[derive(Default)]
-struct StagedReadStreamState {
-    stages: Vec<Vec<u8>>,
-    next_stage: usize,
-    pos: usize,
-}
-
-#[derive(Default)]
-pub struct StagedReadStream {
-    state: RefCell<StagedReadStreamState>,
-}
-
 fn skip_guest_call(qemu: &Qemu, ret_value: u64) -> Result<(), Error> {
     let ret_addr: GuestAddr = qemu.read_return_address().unwrap().try_into().unwrap();
     let rsp: GuestAddr = qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
@@ -129,68 +117,6 @@ impl MemoryBackedStream {
         }
 
         state.pos = end;
-        skip_guest_call(qemu, to_copy as u64)?;
-        Ok(to_copy)
-    }
-}
-
-impl StagedReadStream {
-    pub fn set_stages(&self, stages: Vec<Vec<u8>>) {
-        let mut state = self.state.borrow_mut();
-        state.stages = stages;
-        state.next_stage = 0;
-        state.pos = 0;
-    }
-
-    pub fn reset(&self) {
-        let mut state = self.state.borrow_mut();
-        state.next_stage = 0;
-        state.pos = 0;
-    }
-
-    pub fn emulate_seek(&self, qemu: &Qemu) -> Result<usize, Error> {
-        let off: i64 = qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
-        let action: u64 = qemu.read_reg(Regs::R8).unwrap().try_into().unwrap();
-
-        let mut state = self.state.borrow_mut();
-        let end = state.stages.iter().map(|stage| stage.len()).sum::<usize>() as i64;
-        let base = match action {
-            0 => 0,
-            1 => state.pos as i64,
-            2 => end,
-            _ => state.pos as i64,
-        };
-        let new_pos = (base.saturating_add(off)).clamp(0, end) as usize;
-        state.pos = new_pos;
-
-        skip_guest_call(qemu, new_pos as u64)?;
-        Ok(new_pos)
-    }
-
-    pub fn emulate_read(&self, qemu: &Qemu) -> Result<usize, Error> {
-        let dst: GuestAddr = qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
-        let requested: usize = qemu
-            .read_reg(Regs::R8)
-            .unwrap()
-            .try_into()
-            .unwrap_or(usize::MAX);
-
-        let mut state = self.state.borrow_mut();
-        let stage = state
-            .stages
-            .get(state.next_stage)
-            .cloned()
-            .unwrap_or_default();
-        let to_copy = requested.min(stage.len());
-
-        if to_copy != 0 {
-            qemu.write_mem(dst, &stage[..to_copy]).map_err(|e| {
-                Error::unknown(format!("Failed to write staged read buffer: {e:?}"))
-            })?;
-        }
-
-        state.next_stage = state.next_stage.saturating_add(1);
-        state.pos = state.pos.saturating_add(to_copy);
         skip_guest_call(qemu, to_copy as u64)?;
         Ok(to_copy)
     }

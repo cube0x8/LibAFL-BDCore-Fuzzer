@@ -125,6 +125,10 @@ impl<'a> CevaEmuHarness<'a> {
         self.health_log_every
     }
 
+    pub fn max_target_input_size(&self) -> usize {
+        self.max_target_input_size
+    }
+
     pub fn snapshot_excludes(&self) -> Vec<Range<u64>> {
         vec![]
     }
