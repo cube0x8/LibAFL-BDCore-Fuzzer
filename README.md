@@ -3,7 +3,7 @@
 This repository contains a fuzzer targeting the Bitdefender antivirus engine.
 It uses the [BDClient](https://github.com/cube0x8/BDClient) harness as its target.
 For more information about the fuzzer design and a high-level overview of its
-internals, read [Fuzzing the Bitdefender Engine](https://stackbits.eu/blog/vulnerability_research_bitdefender_engine_part_2.html).
+internals, read [Fuzzing the Bitdefender Engine](https://stackbits.eu/blog/vulnerability_research_bitdefender_part_2.html).
 
 ## How to build
 
