@@ -1,0 +1,128 @@
+use std::cell::RefCell;
+
+use libafl::Error;
+use libafl_qemu::{ArchExtras, GuestAddr, GuestReg, Qemu, Regs};
+
+#[derive(Clone, Copy, Debug)]
+pub struct StreamOverlay {
+    pub input_offset: usize,
+    pub stream_offset: usize,
+    pub max_len: usize,
+}
+
+#[derive(Default)]
+struct MemoryBackedStreamState {
+    data: Vec<u8>,
+    pos: usize,
+}
+
+#[derive(Default)]
+pub struct MemoryBackedStream {
+    state: RefCell<MemoryBackedStreamState>,
+}
+
+fn skip_guest_call(qemu: &Qemu, ret_value: u64) -> Result<(), Error> {
+    let ret_addr: GuestAddr = qemu.read_return_address().unwrap().try_into().unwrap();
+    let rsp: GuestAddr = qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
+
+    qemu.write_reg(Regs::Rax, GuestReg::try_from(ret_value).unwrap())
+        .map_err(|e| Error::unknown(format!("Failed to set RAX: {e:?}")))?;
+    qemu.write_reg(Regs::Sp, GuestReg::try_from(rsp + 8).unwrap())
+        .map_err(|e| Error::unknown(format!("Failed to advance RSP: {e:?}")))?;
+    qemu.write_reg(Regs::Pc, GuestReg::try_from(ret_addr).unwrap())
+        .map_err(|e| Error::unknown(format!("Failed to set PC to return address: {e:?}")))?;
+
+    Ok(())
+}
+
+impl MemoryBackedStream {
+    pub fn rebuild_with_overlays(&self, input: &[u8], overlays: &[StreamOverlay]) {
+        let mut stream_len = 0usize;
+
+        for overlay in overlays {
+            let copy_len = input
+                .len()
+                .saturating_sub(overlay.input_offset)
+                .min(overlay.max_len);
+            stream_len = stream_len.max(overlay.stream_offset + copy_len);
+        }
+
+        let mut state = self.state.borrow_mut();
+        state.data.clear();
+        state.data.resize(stream_len, 0);
+
+        for overlay in overlays {
+            let copy_len = input
+                .len()
+                .saturating_sub(overlay.input_offset)
+                .min(overlay.max_len);
+            if copy_len == 0 {
+                continue;
+            }
+
+            let input_end = overlay.input_offset + copy_len;
+            let stream_end = overlay.stream_offset + copy_len;
+            state.data[overlay.stream_offset..stream_end]
+                .copy_from_slice(&input[overlay.input_offset..input_end]);
+        }
+
+        state.pos = 0;
+    }
+
+    pub fn reset(&self) {
+        self.state.borrow_mut().pos = 0;
+    }
+
+    pub fn emulate_seek(&self, qemu: &Qemu) -> Result<usize, Error> {
+        let new_pos = self.seek(qemu);
+        skip_guest_call(qemu, new_pos as u64)?;
+        Ok(new_pos)
+    }
+
+    fn seek(&self, qemu: &Qemu) -> usize {
+        let off: i64 = qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
+        let action: u64 = qemu.read_reg(Regs::R8).unwrap().try_into().unwrap();
+
+        let mut state = self.state.borrow_mut();
+        let len = state.data.len() as i64;
+        let base = match action {
+            0 => 0,
+            1 => state.pos as i64,
+            2 => len,
+            _ => state.pos as i64,
+        };
+        let new_pos = (base.saturating_add(off)).clamp(0, len) as usize;
+        state.pos = new_pos;
+        new_pos
+    }
+
+    pub fn emulate_read(&self, qemu: &Qemu) -> Result<usize, Error> {
+        let copied = self.read(qemu)?;
+        skip_guest_call(qemu, copied as u64)?;
+        Ok(copied)
+    }
+
+    fn read(&self, qemu: &Qemu) -> Result<usize, Error> {
+        let dst: GuestAddr = qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
+        let requested: usize = qemu
+            .read_reg(Regs::R8)
+            .unwrap()
+            .try_into()
+            .unwrap_or(usize::MAX);
+
+        let mut state = self.state.borrow_mut();
+        let available = state.data.len().saturating_sub(state.pos);
+        let to_copy = requested.min(available);
+        let end = state.pos + to_copy;
+        let src = &state.data[state.pos..end];
+
+        if !src.is_empty() {
+            qemu.write_mem(dst, src).map_err(|e| {
+                Error::unknown(format!("Failed to write emulated read buffer: {e:?}"))
+            })?;
+        }
+
+        state.pos = end;
+        Ok(to_copy)
+    }
+}

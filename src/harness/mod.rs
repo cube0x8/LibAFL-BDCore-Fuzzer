@@ -1,9 +1,7 @@
-mod ceva_emu;
-mod ceva_target;
-mod decode_execute_cold_path;
-mod petite_unpack;
-mod standard;
-mod translate_node_link;
+mod cevakrnl;
+mod cevakrnl_target;
+mod scanfile;
+mod unpackers;
 
 use std::ops::Range;
 
@@ -11,12 +9,16 @@ use libafl::{executors::ExitKind, inputs::BytesInput};
 
 use crate::{bitdefender::BDEngine, scan_profile::ScanProfile};
 
-pub use ceva_emu::CevaEmuHarness;
-pub use ceva_target::{CevaTarget, CevaTargetKind};
-pub use standard::Harness;
-
-pub const MAX_INPUT_SIZE: usize = 1_048_576;
-pub const MAX_TARGET_INPUT_SIZE: usize = 307_200;
+pub use cevakrnl::CevaEmuHarness;
+pub use cevakrnl_target::{CevaTarget, CevaTargetKind};
+pub use scanfile::Harness;
+pub use unpackers::health::{
+    tmin_pc_observer, tmin_pc_was_hit, write_timeout_last_guest_block, CrashContextModule,
+    PcSignal, PcSignalModule, Pelock07d60RetModule, Pelock07d60WindowCaptureModule,
+    PelockStage0CaptureModule, TMinPcHitModule,
+};
+pub const DEFAULT_MAX_INPUT_SIZE: usize = 1_048_576;
+pub const DEFAULT_MAX_TARGET_INPUT_SIZE: usize = 307_200;
 pub const FILE_PATH_SIZE: usize = 1024;
 pub const G_MMAP_FILE_SIZE: usize = 280;
 

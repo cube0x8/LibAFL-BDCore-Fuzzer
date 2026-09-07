@@ -8,21 +8,25 @@ use libafl::{
 use libafl_bolts::AsSlice;
 use libafl_qemu::{ArchExtras, GuestAddr, GuestReg, Qemu, Regs};
 use std::{
+    cell::Cell,
     ops::Range,
     thread,
     time::{Duration, Instant},
 };
 
-use super::{CevaTarget, MAX_TARGET_INPUT_SIZE};
+use super::CevaTarget;
 
 pub struct CevaEmuHarness<'a> {
     qemu: &'a Qemu,
     pub pc: GuestAddr,
     pub stack_ptr: GuestAddr,
+    pub rax: GuestAddr,
     pub rcx: GuestAddr,
     pub rdx: GuestAddr,
     pub r8: GuestAddr,
     pub r9: GuestAddr,
+    pub r10: GuestAddr,
+    pub r11: GuestAddr,
     pub rdi: GuestAddr,
     pub rsi: GuestAddr,
     pub rbx: GuestAddr,
@@ -31,12 +35,17 @@ pub struct CevaEmuHarness<'a> {
     pub r13: GuestAddr,
     pub r14: GuestAddr,
     pub r15: GuestAddr,
+    pub rflags: GuestAddr,
     pub ret_addr: GuestAddr,
     pub exit_point: GuestAddr,
     pub entry_point: GuestAddr,
     pub bd_engine: BDEngine,
     entry_point_spec: String,
     target: Option<Box<dyn CevaTarget>>,
+    max_target_input_size: usize,
+    health_signals_enabled: bool,
+    health_log_every: u64,
+    exec_counter: Cell<u64>,
 }
 
 impl<'a> CevaEmuHarness<'a> {
@@ -44,6 +53,9 @@ impl<'a> CevaEmuHarness<'a> {
         qemu: &'a Qemu,
         entry_point_spec: String,
         target: Box<dyn CevaTarget>,
+        max_target_input_size: usize,
+        health_signals_enabled: bool,
+        health_log_every: u64,
     ) -> Result<CevaEmuHarness<'a>, Error> {
         let mut elf_buffer = Vec::new();
         let elf =
@@ -80,10 +92,13 @@ impl<'a> CevaEmuHarness<'a> {
             qemu,
             pc: 0,
             stack_ptr: 0,
+            rax: 0,
             rcx: 0,
             rdx: 0,
             r8: 0,
             r9: 0,
+            r10: 0,
+            r11: 0,
             rdi: 0,
             rsi: 0,
             rbx: 0,
@@ -92,17 +107,34 @@ impl<'a> CevaEmuHarness<'a> {
             r13: 0,
             r14: 0,
             r15: 0,
+            rflags: 0,
             ret_addr: 0,
             exit_point: 0,
             entry_point: 0,
             bd_engine,
             entry_point_spec,
             target: Some(target),
+            max_target_input_size,
+            health_signals_enabled,
+            health_log_every,
+            exec_counter: Cell::new(0),
         })
     }
 
     pub fn qemu(&self) -> &Qemu {
         self.qemu
+    }
+
+    pub fn health_signals_enabled(&self) -> bool {
+        self.health_signals_enabled
+    }
+
+    pub fn health_log_every(&self) -> u64 {
+        self.health_log_every
+    }
+
+    pub fn max_target_input_size(&self) -> usize {
+        self.max_target_input_size
     }
 
     pub fn snapshot_excludes(&self) -> Vec<Range<u64>> {
@@ -131,8 +163,24 @@ impl<'a> CevaEmuHarness<'a> {
             let _ = self.qemu.run();
         };
 
-        let entry_point_return_address: GuestAddr =
-            self.qemu.read_return_address().unwrap().try_into().unwrap();
+        let post_entry_run_pc: GuestAddr =
+            self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+        println!(
+            "CevaEmu init post-entry run pc={post_entry_run_pc:#x} expected_entry={:#x}",
+            self.entry_point
+        );
+
+        let entry_point_return_address: GuestAddr = match self.qemu.read_return_address() {
+            Ok(ret) => ret.try_into().unwrap(),
+            Err(err) => {
+                println!(
+                    "CevaEmu init failed to read return address at pc={post_entry_run_pc:#x}: {err:?}"
+                );
+                return Err(Error::unknown(format!(
+                    "failed to read return address after entry run at pc={post_entry_run_pc:#x}: {err:?}"
+                )));
+            }
+        };
         println!("Return address = {entry_point_return_address:#x}");
 
         self.exit_point = entry_point_return_address;
@@ -147,13 +195,27 @@ impl<'a> CevaEmuHarness<'a> {
         self.pc = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
         println!("Snapshot at {:#x}", self.pc);
         self.stack_ptr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
+        self.rax = self.qemu.read_reg(Regs::Rax).unwrap().try_into().unwrap();
         self.rcx = self.qemu.read_reg(Regs::Rcx).unwrap().try_into().unwrap();
         self.rdx = self.qemu.read_reg(Regs::Rdx).unwrap().try_into().unwrap();
         self.r8 = self.qemu.read_reg(Regs::R8).unwrap().try_into().unwrap();
         self.r9 = self.qemu.read_reg(Regs::R9).unwrap().try_into().unwrap();
+        self.r10 = self.qemu.read_reg(Regs::R10).unwrap().try_into().unwrap();
+        self.r11 = self.qemu.read_reg(Regs::R11).unwrap().try_into().unwrap();
+        self.rbp = self.qemu.read_reg(Regs::Rbp).unwrap().try_into().unwrap();
         self.rdi = self.qemu.read_reg(Regs::Rdi).unwrap().try_into().unwrap();
         self.rsi = self.qemu.read_reg(Regs::Rsi).unwrap().try_into().unwrap();
         self.rbx = self.qemu.read_reg(Regs::Rbx).unwrap().try_into().unwrap();
+        self.r12 = self.qemu.read_reg(Regs::R12).unwrap().try_into().unwrap();
+        self.r13 = self.qemu.read_reg(Regs::R13).unwrap().try_into().unwrap();
+        self.r14 = self.qemu.read_reg(Regs::R14).unwrap().try_into().unwrap();
+        self.r15 = self.qemu.read_reg(Regs::R15).unwrap().try_into().unwrap();
+        self.rflags = self
+            .qemu
+            .read_reg(Regs::Rflags)
+            .unwrap()
+            .try_into()
+            .unwrap();
         self.ret_addr = entry_point_return_address;
 
         Ok(())
@@ -168,6 +230,9 @@ impl<'a> CevaEmuHarness<'a> {
             .write_reg(Regs::Sp, GuestReg::try_from(self.stack_ptr).unwrap())
             .map_err(|e| Error::unknown(format!("Failed to restore SP: {e:?}")))?;
         self.qemu
+            .write_reg(Regs::Rax, GuestReg::try_from(self.rax).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore RAX: {e:?}")))?;
+        self.qemu
             .write_reg(Regs::Rcx, GuestReg::try_from(self.rcx).unwrap())
             .map_err(|e| Error::unknown(format!("Failed to restore RCX: {e:?}")))?;
         self.qemu
@@ -179,6 +244,39 @@ impl<'a> CevaEmuHarness<'a> {
         self.qemu
             .write_reg(Regs::R9, GuestReg::try_from(self.r9).unwrap())
             .map_err(|e| Error::unknown(format!("Failed to restore R9: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::R10, GuestReg::try_from(self.r10).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R10: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::R11, GuestReg::try_from(self.r11).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R11: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::Rbp, GuestReg::try_from(self.rbp).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore RBP: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::Rdi, GuestReg::try_from(self.rdi).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore RDI: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::Rsi, GuestReg::try_from(self.rsi).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore RSI: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::Rbx, GuestReg::try_from(self.rbx).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore RBX: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::R12, GuestReg::try_from(self.r12).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R12: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::R13, GuestReg::try_from(self.r13).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R13: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::R14, GuestReg::try_from(self.r14).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R14: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::R15, GuestReg::try_from(self.r15).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore R15: {e:?}")))?;
+        self.qemu
+            .write_reg(Regs::Rflags, GuestReg::try_from(self.rflags).unwrap())
+            .map_err(|e| Error::unknown(format!("Failed to restore RFLAGS: {e:?}")))?;
 
         // reset additional registers/memory based on the target
         self.target.as_ref().unwrap().reset(self)?;
@@ -186,25 +284,62 @@ impl<'a> CevaEmuHarness<'a> {
         Ok(())
     }
 
+    fn run_until_exit(&self) -> Result<(), Error> {
+        loop {
+            let run_result = unsafe { self.qemu.run() };
+
+            let pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
+            if let Some(path) = std::env::var_os("BDCORE_CEVA_RUN_DIAG_FILE") {
+                if let Ok(mut file) = std::fs::OpenOptions::new()
+                    .create(true)
+                    .append(true)
+                    .open(path)
+                {
+                    use std::io::Write;
+                    let _ = writeln!(file, "result={run_result:?} pc={pc:#x}");
+                }
+            }
+            if pc == self.exit_point {
+                return Ok(());
+            }
+
+            if self.target.as_ref().unwrap().handle_breakpoint(self)? {
+                continue;
+            }
+
+            log::debug!(
+                "CevaEmu stopped at unexpected breakpoint pc={pc:#x} expected_exit={:#x}",
+                self.exit_point,
+            );
+            return Ok(());
+        }
+    }
+
     pub fn run(&self, input: &BytesInput, scan_profile: Option<&ScanProfile>) -> ExitKind {
         let target = input.target_bytes();
         let mut buf = target.as_slice();
 
+        if let Some(dir) = std::env::var_os("BDCORE_LAST_INPUT_DIR") {
+            let path = std::path::PathBuf::from(dir)
+                .join(format!("last-input.{}.bin", std::process::id()));
+            let _ = std::fs::write(path, buf);
+        }
+
         let original_len = buf.len();
         let mut len = buf.len() as GuestReg;
-        if len > MAX_TARGET_INPUT_SIZE as GuestReg {
-            buf = &buf[0..MAX_TARGET_INPUT_SIZE];
-            len = MAX_TARGET_INPUT_SIZE as GuestReg;
+        if len > self.max_target_input_size as GuestReg {
+            buf = &buf[0..self.max_target_input_size];
+            len = self.max_target_input_size as GuestReg;
         }
         let truncated = original_len != buf.len();
 
         let reset_started_at = Instant::now();
         self.reset().unwrap();
-        self.target
-            .as_ref()
-            .unwrap()
-            .prepare_input(self.qemu, buf, len)
-            .unwrap();
+        let target = self.target.as_ref().unwrap();
+        if let Err(err) = target.prepare_input(self.qemu, buf, len) {
+            log::debug!("Rejecting invalid {} input: {err}", target.name());
+            return ExitKind::Ok;
+        }
 
         if let Some(scan_profile) = scan_profile {
             scan_profile.record_input_reset(reset_started_at.elapsed());
@@ -220,9 +355,7 @@ impl<'a> CevaEmuHarness<'a> {
                 self.exit_point,
             );
             let guest_exec_started_at = Instant::now();
-            unsafe {
-                let _ = self.qemu.run();
-            };
+            self.run_until_exit().unwrap();
             let post_pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
             let post_sp: GuestAddr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
             log::debug!(
@@ -231,7 +364,14 @@ impl<'a> CevaEmuHarness<'a> {
                 post_pc == self.exit_point,
             );
             scan_profile.record_guest_exec(guest_exec_started_at.elapsed(), buf.len(), truncated);
-            return ExitKind::Ok;
+            let execs = self.exec_counter.get().saturating_add(1);
+            self.exec_counter.set(execs);
+            self.target
+                .as_ref()
+                .unwrap()
+                .after_run(self, execs)
+                .unwrap();
+            return self.target.as_ref().unwrap().exit_kind();
         }
 
         log::debug!(
@@ -244,9 +384,7 @@ impl<'a> CevaEmuHarness<'a> {
             self.ret_addr,
             self.exit_point,
         );
-        unsafe {
-            let _ = self.qemu.run();
-        };
+        self.run_until_exit().unwrap();
         let post_pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
         let post_sp: GuestAddr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
         log::debug!(
@@ -254,6 +392,13 @@ impl<'a> CevaEmuHarness<'a> {
             self.exit_point,
             post_pc == self.exit_point,
         );
-        ExitKind::Ok
+        let execs = self.exec_counter.get().saturating_add(1);
+        self.exec_counter.set(execs);
+        self.target
+            .as_ref()
+            .unwrap()
+            .after_run(self, execs)
+            .unwrap();
+        self.target.as_ref().unwrap().exit_kind()
     }
 }

@@ -8,6 +8,8 @@ use std::{
     path::PathBuf,
 };
 
+use crate::harness::{DEFAULT_MAX_INPUT_SIZE, DEFAULT_MAX_TARGET_INPUT_SIZE};
+
 #[derive(Default)]
 pub struct Version;
 
@@ -62,6 +64,27 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
+        help = "Minimize each seed while preserving an exact target-PC hit (ScanFile harness)"
+    )]
+    pub tmin: bool,
+
+    #[arg(
+        long,
+        requires = "tmin",
+        help = "Exact PC that minimized inputs must reach, in module:+offset format"
+    )]
+    pub tmin_target_pc: Option<String>,
+
+    #[arg(
+        long,
+        default_value = "10000",
+        value_parser = FuzzerOptions::parse_positive_usize,
+        help = "LibAFL testcase-minimization iterations per accepted reduction"
+    )]
+    pub tmin_iterations: usize,
+
+    #[arg(
+        long,
         help = "Cpu cores to run with ASAN/QASAN hooks",
         value_parser = Cores::from_cmdline
     )]
@@ -93,21 +116,49 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
+        requires = "asan_cores",
+        help = "Ignore QASAN BadFree reports for pointers absent from its allocation tree (for valid allocations created before the snapshot)"
+    )]
+    pub asan_ignore_untracked_bad_frees: bool,
+
+    #[arg(
+        long,
         help = "Use the PE format-aware mutator instead of the default havoc mutator"
     )]
     pub pe_mutator: bool,
 
     #[arg(
         long,
-        help = "Enable PE mutator reporting to /tmp/pe-report.txt. Requires --pe-mutator"
+        help = "Use only the PE section body mutator. Requires --section-index and conflicts with --pe-mutator/--pelock",
+        requires = "section_index",
+        conflicts_with_all = ["pe_mutator", "pelock"]
+    )]
+    pub section_body_mutator: bool,
+
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(usize),
+        help = "Target section index for --section-body-mutator"
+    )]
+    pub section_index: Option<usize>,
+
+    #[arg(
+        long,
+        help = "Enable PE mutator reporting to /tmp/pe-report.txt. Requires --pe-mutator or --pelock"
     )]
     pub pe_mutator_reporting: bool,
 
     #[arg(
         long,
+        help = "Directory containing PE mutator input manifests. If omitted, --pe-mutator/--pelock also checks sidecars under --input/.pemutator."
+    )]
+    pub pe_manifest_dir: Option<PathBuf>,
+
+    #[arg(
+        long,
         default_value_t = 2,
         value_parser = FuzzerOptions::parse_positive_usize,
-        help = "Minimum number of stacked PE mutations per pass. Requires --pe-mutator"
+        help = "Minimum number of stacked PE mutations per pass. Requires --pe-mutator or --pelock"
     )]
     pub pe_min_stack_depth: usize,
 
@@ -115,34 +166,57 @@ pub struct FuzzerOptions {
         long,
         default_value_t = 2,
         value_parser = FuzzerOptions::parse_positive_usize,
-        help = "Maximum number of stacked PE mutations per pass. Requires --pe-mutator"
+        help = "Maximum number of stacked PE mutations per pass. Requires --pe-mutator or --pelock"
     )]
     pub pe_max_stack_depth: usize,
 
-    #[arg(long, help = "Enable only PE header mutations. Requires --pe-mutator")]
+    #[arg(
+        long,
+        help = "Enable only PE header mutations. Requires --pe-mutator or --pelock"
+    )]
     pub pe_header: bool,
 
-    #[arg(long, help = "Enable only section mutations. Requires --pe-mutator")]
+    #[arg(
+        long,
+        help = "Enable only section mutations. Requires --pe-mutator or --pelock"
+    )]
     pub sections: bool,
 
-    #[arg(long, help = "Enable only assembly mutations. Requires --pe-mutator")]
+    #[arg(
+        long,
+        help = "Enable only assembly mutations. Requires --pe-mutator or --pelock"
+    )]
     pub assembly: bool,
 
     #[arg(
         long,
-        help = "Enable only export directory mutations. Requires --pe-mutator"
+        value_parser = clap::value_parser!(u32),
+        help = "Relative weight for semantic assembly mutations. Requires --pe-mutator or --pelock"
+    )]
+    pub pe_asm_semantic_weight: Option<u32>,
+
+    #[arg(
+        long,
+        value_parser = clap::value_parser!(u32),
+        help = "Relative weight for raw assembly mutations. Requires --pe-mutator or --pelock"
+    )]
+    pub pe_asm_raw_weight: Option<u32>,
+
+    #[arg(
+        long,
+        help = "Enable only export directory mutations. Requires --pe-mutator or --pelock"
     )]
     pub export_dir: bool,
 
     #[arg(
         long,
-        help = "Enable only resource directory mutations. Requires --pe-mutator"
+        help = "Enable only resource directory mutations. Requires --pe-mutator or --pelock"
     )]
     pub resource_dir: bool,
 
     #[arg(
         long,
-        help = "Enable only data directory entry mutations. Requires --pe-mutator"
+        help = "Enable only data directory entry mutations. Requires --pe-mutator or --pelock"
     )]
     pub data_dir: bool,
 
@@ -151,6 +225,12 @@ pub struct FuzzerOptions {
         help = "Only mutate initial seed inputs; keep later corpus discoveries but do not schedule them for mutation"
     )]
     pub only_seeds: bool,
+
+    #[arg(
+        long,
+        help = "Use the power queue scheduler directly, without the edge-index minimizer culling pass"
+    )]
+    pub disable_minimizer_scheduler: bool,
 
     #[arg(
         long,
@@ -169,6 +249,15 @@ pub struct FuzzerOptions {
     )]
     pub drcov: Option<PathBuf>,
 
+    #[arg(
+        long,
+        help = "Treat -r/--rerun-input as a directory and write one aggregate DrCov trace for all regular files in it. Requires -d/--drcov and --modules.",
+        requires = "rerun_input",
+        requires = "drcov",
+        requires = "bitdefender_modules"
+    )]
+    pub drcov_bulk: bool,
+
     #[arg(short = 'r', help = "Rerun an input to gather drcov coverage")]
     pub rerun_input: Option<PathBuf>,
 
@@ -183,6 +272,22 @@ pub struct FuzzerOptions {
 
     #[arg(
         long,
+        default_value_t = DEFAULT_MAX_INPUT_SIZE,
+        value_parser = FuzzerOptions::parse_positive_usize,
+        help = "Guest input buffer mapping size for the standard ScanFile harness"
+    )]
+    pub max_input_size: usize,
+
+    #[arg(
+        long,
+        default_value_t = DEFAULT_MAX_TARGET_INPUT_SIZE,
+        value_parser = FuzzerOptions::parse_positive_usize,
+        help = "Maximum input bytes sent to the target and maximum serialized PE mutator output"
+    )]
+    pub max_target_input_size: usize,
+
+    #[arg(
+        long,
         help = "Emit ScanFile timing reports every N iterations",
         default_value = "1000",
         value_parser = clap::value_parser!(u64).range(1..)
@@ -191,6 +296,18 @@ pub struct FuzzerOptions {
 
     #[arg(long, help = "Timeout in milli-seconds", default_value = "1000", value_parser = FuzzerOptions::parse_timeout)]
     pub timeout: Duration,
+
+    #[arg(
+        long,
+        help = "Treat only crashes as objectives; timed-out inputs are discarded from both the solutions corpus and the evolving queue"
+    )]
+    pub crashes_only: bool,
+
+    #[arg(
+        long,
+        help = "Execute the initial corpus once, retain only inputs that return ExitKind::Ok in --queue, write filter_outcomes.tsv next to the queue, and exit"
+    )]
+    pub filter_completing_corpus: bool,
 
     #[arg(long, help = "Log file")]
     pub log: Option<String>,
@@ -235,42 +352,111 @@ pub struct FuzzerOptions {
     )]
     pub exit_points: Option<Vec<String>>,
 
-    #[arg(long, help = "Target the ceva_emu TranslateNodeLink function")]
-    pub translate_node_link: bool,
+    #[arg(
+        long,
+        help = "Target the fsg.xmd post-decode callback and mutate its decoded image plus parser configuration"
+    )]
+    pub fsg_postdecode: bool,
 
     #[arg(
         long,
-        help = "Target the ceva_emu CevaEmuDecodeExecuteColdPath function"
+        help = "Target pelock.xmd worker and emulate its local seek/read thunks from a Rust-backed fake stream"
     )]
-    pub decode_execute_cold_path: bool,
+    pub pelock: bool,
 
     #[arg(
         long,
-        help = "Target petite.xmd worker entry and mutate the a4 staged entry-stub buffer"
+        requires = "pelock",
+        help = "Use only manifest-guided PE/assembly mutations for PELock and disable its record-table-specific mutator"
     )]
-    pub petite_a4: bool,
+    pub pelock_pe_only: bool,
 
     #[arg(
         long,
-        help = "Target petite.xmd after the second-stage 0x2000 read and mutate that filled buffer"
+        help = "Target pec3.xmd worker entry and mutate the a4 staged entry-stub buffer"
     )]
-    pub petite_2000: bool,
+    pub pec3_a4: bool,
 
     #[arg(
         long,
-        value_parser = clap::value_parser!(u64).range(2..),
-        help = "Maximum entry-point breakpoint hit count for --decode-execute-cold-path"
+        help = "Target pec3.xmd worker entry and emulate its local seek/read thunks, fuzzing the first 0x40 returned stage"
     )]
-    pub max_bp_hit_count: Option<u64>,
+    pub pec3_40: bool,
 
     #[arg(
         long,
-        help = "Entry point for ceva_emu targeted mutations in format module:+offset"
+        help = "Target pec3.xmd worker entry and emulate its local seek/read thunks, fuzzing the later 0x28 returned stage"
     )]
+    pub pec3_28: bool,
+
+    #[arg(
+        long,
+        help = "Target pec3.xmd worker entry for the dominant PECompact family, replaying read40/read10/read28/main with a fixed family header and fuzzed read40/read28/main buffers"
+    )]
+    pub pec3_peviewer: bool,
+
+    #[arg(
+        long,
+        requires = "pec3_peviewer",
+        help = "Restrict the PEViewer PEC3 mutator to the 0x40, 0x10, and 0x28 control records, leaving the expensive main compressed body unchanged"
+    )]
+    pub pec3_peviewer_control_only: bool,
+
+    #[arg(
+        long,
+        requires = "pec3_peviewer",
+        conflicts_with = "pec3_peviewer_control_only",
+        help = "Restrict the PEViewer PEC3 mutator to the verified 0xB79-byte main encoded-body read"
+    )]
+    pub pec3_peviewer_main_only: bool,
+
+    #[arg(
+        long,
+        requires = "pec3_peviewer",
+        conflicts_with_all = ["pec3_peviewer_control_only", "pec3_peviewer_main_only"],
+        help = "Append a fuzzed pattern after the 0x6e400-byte PEViewer file and inject it into operation-4 ranges that exceed their initialized decoded extents"
+    )]
+    pub pec3_peviewer_heap_poison: bool,
+
+    #[arg(
+        long,
+        help = "Target pec3.xmd worker entry for the alternate PECompact Hash family, replaying read40/read10/read28/main with a fixed family header and fuzzed read40/read28/main buffers"
+    )]
+    pub pec3_hash: bool,
+
+    #[arg(
+        long,
+        help = "Target pec3.xmd after transform/decode and mutate the decoded parser image"
+    )]
+    pub pec3_postdecode: bool,
+
+    #[arg(
+        long,
+        help = "Target the PEC3 mode-1 operation-11 callback and mutate its live descriptor plus materialized-image source payload"
+    )]
+    pub pec3_operation11: bool,
+
+    #[arg(
+        long,
+        help = "Target the PEC3 mode-2 operation-11 callback and mutate its live descriptor, selector tables, and materialized-image payload"
+    )]
+    pub pec3_operation11_mode2: bool,
+
+    #[arg(long, help = "Target snapshot entry point in module:+offset format")]
     pub entry_point: Option<String>,
 
+    #[arg(long, help = "Enable optional FSG or PELock health probes")]
+    pub ceva_health_signals: bool,
+
     #[arg(
         long,
+        default_value = "10000",
+        value_parser = clap::value_parser!(u64).range(1..),
+        help = "Emit unpacker health summaries every N executions when --ceva-health-signals is enabled"
+    )]
+    pub ceva_health_log_every: u64,
+
+    #[arg(
         long,
         help = "Comma separated PCs to skip in ASAN callback",
         value_delimiter = ','
@@ -283,13 +469,19 @@ pub struct FuzzerOptions {
 
 impl FuzzerOptions {
     fn any_ceva_target_selected(&self) -> bool {
-        self.translate_node_link
-            || self.decode_execute_cold_path
-            || self.petite_a4
-            || self.petite_2000
+        self.fsg_postdecode
+            || self.pelock
+            || self.pec3_a4
+            || self.pec3_40
+            || self.pec3_28
+            || self.pec3_peviewer
+            || self.pec3_hash
+            || self.pec3_operation11
+            || self.pec3_operation11_mode2
+            || self.pec3_postdecode
     }
 
-    fn any_pe_mutation_group_selected(&self) -> bool {
+    pub(crate) fn any_pe_mutation_group_selected(&self) -> bool {
         self.pe_header
             || self.sections
             || self.assembly
@@ -297,7 +489,9 @@ impl FuzzerOptions {
             || self.resource_dir
             || self.data_dir
     }
-
+    pub fn uses_full_pe_mutator(&self) -> bool {
+        self.pe_mutator || self.pelock
+    }
     fn absolutize_path(path: PathBuf) -> PathBuf {
         if path.is_absolute() {
             path
@@ -388,6 +582,12 @@ impl FuzzerOptions {
         }
     }
 
+    pub fn pe_manifest_dir(&self) -> Option<PathBuf> {
+        self.pe_manifest_dir
+            .as_ref()
+            .map(|path| Self::absolutize_path(path.clone()))
+    }
+
     pub fn output_dir(&self) -> Option<PathBuf> {
         if let Some(_) = &self.rerun_input {
             return Some(Self::absolutize_path(PathBuf::from("./drcov_output")));
@@ -440,29 +640,125 @@ impl FuzzerOptions {
     }
 
     pub fn validate(&self) {
-        if (self.pe_min_stack_depth != 2 || self.pe_max_stack_depth != 2) && !self.pe_mutator {
+        if self.tmin && self.tmin_target_pc.is_none() {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
-                ErrorKind::ArgumentConflict,
-                "Using --pe-min-stack-depth/--pe-max-stack-depth requires --pe-mutator",
+                ErrorKind::MissingRequiredArgument,
+                "Using --tmin requires --tmin-target-pc <module:+offset>",
             )
             .exit();
         }
 
-        if self.pe_mutator_reporting && !self.pe_mutator {
+        if self.tmin && self.rerun_input.is_some() {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
-                "Using --pe-mutator-reporting requires --pe-mutator",
+                "Using --tmin conflicts with -r/--rerun-input",
             )
             .exit();
         }
 
-        if self.any_pe_mutation_group_selected() && !self.pe_mutator {
+        if self.tmin && self.any_ceva_target_selected() {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
-                "Using --pe-header/--sections/--assembly/--export-dir/--resource-dir/--data-dir requires --pe-mutator",
+                "Using --tmin requires the standard ScanFile harness, not a focused unpacker target",
+            )
+            .exit();
+        }
+
+        if self.tmin && (self.asan_cores.is_some() || self.cmplog_cores.is_some()) {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --tmin does not support ASAN or CmpLog cores",
+            )
+            .exit();
+        }
+
+        if (self.pe_min_stack_depth != 2 || self.pe_max_stack_depth != 2)
+            && !self.uses_full_pe_mutator()
+        {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --pe-min-stack-depth/--pe-max-stack-depth requires --pe-mutator or --pelock",
+            )
+            .exit();
+        }
+
+        if self.pe_mutator_reporting && !self.uses_full_pe_mutator() {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --pe-mutator-reporting requires --pe-mutator or --pelock",
+            )
+            .exit();
+        }
+
+        if self.any_pe_mutation_group_selected() && !self.uses_full_pe_mutator() {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --pe-header/--sections/--assembly/--export-dir/--resource-dir/--data-dir requires --pe-mutator or --pelock",
+            )
+            .exit();
+        }
+
+        if (self.pe_asm_semantic_weight.is_some() || self.pe_asm_raw_weight.is_some())
+            && !self.uses_full_pe_mutator()
+        {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --pe-asm-semantic-weight/--pe-asm-raw-weight requires --pe-mutator or --pelock",
+            )
+            .exit();
+        }
+
+        if self.section_body_mutator && self.pelock {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --section-body-mutator conflicts with --pelock",
+            )
+            .exit();
+        }
+
+        if self.section_index.is_some() && !self.section_body_mutator {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --section-index requires --section-body-mutator",
+            )
+            .exit();
+        }
+
+        if self.section_body_mutator && self.pe_mutator_reporting {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --pe-mutator-reporting requires --pe-mutator/--pelock and is not supported with --section-body-mutator",
+            )
+            .exit();
+        }
+
+        if self.section_body_mutator && self.any_pe_mutation_group_selected() {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --section-body-mutator conflicts with --pe-header/--sections/--assembly/--export-dir/--resource-dir/--data-dir",
+            )
+            .exit();
+        }
+
+        if self.section_body_mutator
+            && (self.pe_min_stack_depth != 2 || self.pe_max_stack_depth != 2)
+        {
+            let mut cmd = FuzzerOptions::command();
+            cmd.error(
+                ErrorKind::ArgumentConflict,
+                "Using --pe-min-stack-depth/--pe-max-stack-depth is not supported with --section-body-mutator",
             )
             .exit();
         }
@@ -489,6 +785,31 @@ impl FuzzerOptions {
                     "Using -d/--drcov requires --modules <module[,module...]>",
                 )
                 .exit();
+            }
+        }
+
+        if self.drcov_bulk {
+            match &self.rerun_input {
+                Some(path) if path.is_dir() => {}
+                Some(path) => {
+                    let mut cmd = FuzzerOptions::command();
+                    cmd.error(
+                        ErrorKind::ValueValidation,
+                        format!(
+                            "Using --drcov-bulk requires -r/--rerun-input to be a directory: {:?}",
+                            path
+                        ),
+                    )
+                    .exit();
+                }
+                None => {
+                    let mut cmd = FuzzerOptions::command();
+                    cmd.error(
+                        ErrorKind::MissingRequiredArgument,
+                        "Using --drcov-bulk requires -r/--rerun-input <directory>",
+                    )
+                    .exit();
+                }
             }
         }
 
@@ -525,10 +846,16 @@ impl FuzzerOptions {
         }
 
         if [
-            self.translate_node_link,
-            self.decode_execute_cold_path,
-            self.petite_a4,
-            self.petite_2000,
+            self.fsg_postdecode,
+            self.pelock,
+            self.pec3_a4,
+            self.pec3_40,
+            self.pec3_28,
+            self.pec3_peviewer,
+            self.pec3_hash,
+            self.pec3_operation11,
+            self.pec3_operation11_mode2,
+            self.pec3_postdecode,
         ]
         .into_iter()
         .filter(|enabled| *enabled)
@@ -538,7 +865,7 @@ impl FuzzerOptions {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
-                "Only one ceva target can be used",
+                "Only one focused unpacker target can be used",
             )
             .exit();
         }
@@ -547,7 +874,7 @@ impl FuzzerOptions {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::MissingRequiredArgument,
-                "Using a ceva_emu target requires --entry-point <module:+offset>",
+                "Using a focused unpacker target requires --entry-point <module:+offset>",
             )
             .exit();
         }
@@ -556,25 +883,7 @@ impl FuzzerOptions {
             let mut cmd = FuzzerOptions::command();
             cmd.error(
                 ErrorKind::ArgumentConflict,
-                "Using --entry-point currently requires a ceva_emu target such as --translate-node-link",
-            )
-            .exit();
-        }
-
-        if self.decode_execute_cold_path && self.max_bp_hit_count.is_none() {
-            let mut cmd = FuzzerOptions::command();
-            cmd.error(
-                ErrorKind::MissingRequiredArgument,
-                "Using --decode-execute-cold-path requires --max-bp-hit-count <count>",
-            )
-            .exit();
-        }
-
-        if !self.decode_execute_cold_path && self.max_bp_hit_count.is_some() {
-            let mut cmd = FuzzerOptions::command();
-            cmd.error(
-                ErrorKind::ArgumentConflict,
-                "Using --max-bp-hit-count requires --decode-execute-cold-path",
+                "Using --entry-point requires a selected PELock, PEC3, or FSG target",
             )
             .exit();
         }

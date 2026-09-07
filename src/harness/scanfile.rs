@@ -9,14 +9,14 @@ use libafl::{
     Error,
 };
 use libafl_bolts::AsSlice;
-use libafl_qemu::{elf::EasyElf, ArchExtras, GuestAddr, GuestReg, MmapPerms, Qemu, Regs};
+use libafl_qemu::{elf::EasyElf, GuestAddr, GuestReg, MmapPerms, Qemu, Regs};
 use std::{
     ops::Range,
     thread,
     time::{Duration, Instant},
 };
 
-use super::{FILE_PATH_SIZE, G_MMAP_FILE_SIZE, MAX_INPUT_SIZE, MAX_TARGET_INPUT_SIZE};
+use super::{FILE_PATH_SIZE, G_MMAP_FILE_SIZE};
 
 const SCAN_FILE_CORE_SET_CALL_OFFSET: GuestAddr = 0x7c;
 const SCAN_FILE_AFTER_CORE_SET_OFFSET: GuestAddr = 0x7e;
@@ -24,13 +24,15 @@ const SCAN_FILE_AFTER_CORE_SET_OFFSET: GuestAddr = 0x7e;
 pub struct Harness<'a> {
     qemu: &'a Qemu,
     pub input_addr: GuestAddr,
+    pub max_input_size: usize,
+    pub max_target_input_size: usize,
     pub file_path: GuestAddr,
     pub g_mmap_file_addr: GuestAddr,
     pub pc: GuestAddr,
     pub stack_ptr: GuestAddr,
     pub ret_addr: GuestAddr,
     pub exit_points: Vec<GuestAddr>,
-    pub scan_file_ptr: GuestAddr,
+    pub scan_file_call_pc: GuestAddr,
     pub scan_file_core_set_call_pc: GuestAddr,
     pub scan_file_after_core_set_pc: GuestAddr,
     pub rdi: GuestAddr,
@@ -38,7 +40,11 @@ pub struct Harness<'a> {
 }
 
 impl<'a> Harness<'a> {
-    pub fn new(qemu: &'a Qemu) -> Result<Harness<'a>, Error> {
+    pub fn new(
+        qemu: &'a Qemu,
+        max_input_size: usize,
+        max_target_input_size: usize,
+    ) -> Result<Harness<'a>, Error> {
         let mut elf_buffer = Vec::new();
         let elf = EasyElf::from_file(qemu.binary_path(), &mut elf_buffer).unwrap();
 
@@ -47,13 +53,35 @@ impl<'a> Harness<'a> {
             .expect("Symbol ScanFile not found");
         println!("ScanFile @ {scan_file_ptr:#x}");
 
+        let main_ptr = elf
+            .resolve_symbol("main", qemu.load_addr())
+            .expect("Symbol main not found");
+        let mut main_code = vec![0_u8; 0x2000];
+        qemu.read_mem(main_ptr, &mut main_code)
+            .map_err(|err| Error::unknown(format!("Failed to read main: {err:?}")))?;
+        let scan_file_call_pc = main_code
+            .windows(5)
+            .enumerate()
+            .find_map(|(offset, instruction)| {
+                if instruction[0] != 0xe8 {
+                    return None;
+                }
+
+                let displacement = i32::from_le_bytes(instruction[1..5].try_into().unwrap()) as i64;
+                let next_pc = main_ptr.wrapping_add(offset as GuestAddr + 5);
+                let target = (next_pc as i64).wrapping_add(displacement) as GuestAddr;
+                (target == scan_file_ptr).then_some(main_ptr + offset as GuestAddr)
+            })
+            .ok_or_else(|| Error::unknown("Could not find main's direct call to ScanFile"))?;
+        println!("ScanFile call @ {scan_file_call_pc:#x}");
+
         let g_mmap_file_ptr = elf
             .resolve_symbol("g_mmap_file", qemu.load_addr())
             .expect("Symbol g_mmap_file not found");
         println!("g_mmap_file @ {g_mmap_file_ptr:#x}");
 
         let input_addr = qemu
-            .map_private(0, MAX_INPUT_SIZE, MmapPerms::ReadWrite)
+            .map_private(0, max_input_size, MmapPerms::ReadWrite)
             .map_err(|e| Error::unknown(format!("Failed to map input buffer: {e:}")))?;
         println!("Input buffer @ {input_addr:#x}");
 
@@ -92,13 +120,15 @@ impl<'a> Harness<'a> {
         Ok(Harness {
             qemu,
             input_addr,
+            max_input_size,
+            max_target_input_size,
             file_path,
             g_mmap_file_addr: g_mmap_file_ptr,
             pc: 0,
             stack_ptr: 0,
             ret_addr: 0,
             exit_points: Vec::new(),
-            scan_file_ptr,
+            scan_file_call_pc,
             scan_file_core_set_call_pc: scan_file_ptr + SCAN_FILE_CORE_SET_CALL_OFFSET,
             scan_file_after_core_set_pc: scan_file_ptr + SCAN_FILE_AFTER_CORE_SET_OFFSET,
             rdi: 0,
@@ -112,7 +142,7 @@ impl<'a> Harness<'a> {
         let g_mmap_file_addr = self.g_mmap_file_addr as u64;
 
         vec![
-            input_addr..(input_addr + MAX_INPUT_SIZE as u64),
+            input_addr..(input_addr + self.max_input_size as u64),
             file_path..(file_path + FILE_PATH_SIZE as u64),
             g_mmap_file_addr..(g_mmap_file_addr + G_MMAP_FILE_SIZE as u64),
         ]
@@ -193,21 +223,21 @@ impl<'a> Harness<'a> {
 
         thread::sleep(Duration::from_secs(5));
 
-        self.qemu.set_breakpoint(self.scan_file_ptr);
+        self.qemu.set_breakpoint(self.scan_file_call_pc);
+        self.qemu.flush_jit();
         unsafe {
             let _ = self.qemu.run();
         };
 
         let stack_ptr: GuestAddr = self.qemu.read_reg(Regs::Sp).unwrap().try_into().unwrap();
         let rdi: GuestAddr = self.qemu.read_reg(Regs::Rdi).unwrap().try_into().unwrap();
-        let scan_file_ret_addr: GuestAddr =
-            self.qemu.read_return_address().unwrap().try_into().unwrap();
+        let scan_file_ret_addr = self.scan_file_call_pc + 5;
         println!("Return address = {scan_file_ret_addr:#x}");
 
         let pc: GuestAddr = self.qemu.read_reg(Regs::Pc).unwrap().try_into().unwrap();
         println!("Break at {pc:#x}");
 
-        self.qemu.remove_breakpoint(self.scan_file_ptr);
+        self.qemu.remove_breakpoint(self.scan_file_call_pc);
 
         self.exit_points = match exit_points {
             Some(specs) => self.bd_engine.resolve_exit_points(&specs)?,
@@ -256,9 +286,10 @@ impl<'a> Harness<'a> {
 
         let original_len = buf.len();
         let mut len = buf.len() as GuestReg;
-        if len > MAX_TARGET_INPUT_SIZE as GuestReg {
-            buf = &buf[0..MAX_TARGET_INPUT_SIZE];
-            len = MAX_TARGET_INPUT_SIZE as GuestReg;
+        let max_run_input_size = self.max_target_input_size.min(self.max_input_size);
+        if len > max_run_input_size as GuestReg {
+            buf = &buf[0..max_run_input_size];
+            len = max_run_input_size as GuestReg;
         }
         let truncated = original_len != buf.len();
 

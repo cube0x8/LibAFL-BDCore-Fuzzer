@@ -12,6 +12,14 @@ pub struct BDModule {
     pub size: u64,
 }
 
+#[derive(Clone, Debug)]
+pub struct BDModuleHit {
+    pub name: String,
+    pub start_addr: u64,
+    pub size: u64,
+    pub offset: u64,
+}
+
 pub struct BDEngine {
     pub modules: Vec<BDModule>,
     pub modules_to_instrument: Option<RangeMap<u64, (u16, String)>>,
@@ -31,6 +39,31 @@ impl fmt::Display for BDModule {
             self.start_addr + self.size
         )
     }
+}
+
+impl fmt::Display for BDModuleHit {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        write!(
+            f,
+            "{}:+{:#x} ({:#x}-{:#x})",
+            self.name,
+            self.offset,
+            self.start_addr,
+            self.start_addr + self.size
+        )
+    }
+}
+
+pub fn module_for_addr(modules: &[BDModule], addr: u64) -> Option<BDModuleHit> {
+    modules
+        .iter()
+        .find(|module| addr >= module.start_addr && addr < module.start_addr + module.size)
+        .map(|module| BDModuleHit {
+            name: module.name.clone(),
+            start_addr: module.start_addr,
+            size: module.size,
+            offset: addr - module.start_addr,
+        })
 }
 
 impl BDEngine {
@@ -57,16 +90,20 @@ impl BDEngine {
             size,
         });
     }
-
-    pub fn get_module_by_addr(&self, addr: u64) -> Option<&BDModule> {
-        for module in &self.modules {
-            if addr >= module.start_addr && addr < module.start_addr + module.size {
-                return Some(module);
+    /*
+        pub fn get_module_by_addr(&self, addr: u64) -> Option<&BDModule> {
+            for module in &self.modules {
+                if addr >= module.start_addr && addr < module.start_addr + module.size {
+                    return Some(module);
+                }
             }
+            None
         }
-        None
-    }
 
+        pub fn module_for_addr(&self, addr: u64) -> Option<BDModuleHit> {
+            module_for_addr(&self.modules, addr)
+        }
+    */
     pub fn core_initialization(&mut self, qemu: &Qemu) {
         qemu.set_breakpoint(self.initialize_core_ptr);
 
@@ -255,16 +292,35 @@ impl BDEngine {
             })?
         };
 
-        let module = self
+        let matching_modules = self
             .modules
             .iter()
-            .find(|module| module.name == module_name)
-            .ok_or_else(|| {
-                Error::unknown(format!(
-                    "{kind} module '{module_name}' not found. Available modules: {:?}",
-                    self.modules
-                ))
-            })?;
+            .filter(|module| module.name == module_name)
+            .collect::<Vec<_>>();
+
+        if matching_modules.is_empty() {
+            return Err(Error::unknown(format!(
+                "{kind} module '{module_name}' not found. Available modules: {:?}",
+                self.modules
+            )));
+        }
+
+        if matching_modules.len() > 1 {
+            println!(
+                "{} {} has {} matching module instances:",
+                kind.to_ascii_uppercase(),
+                spec,
+                matching_modules.len()
+            );
+            for module in &matching_modules {
+                println!(
+                    "  {} @ {:#x} size {:#x}",
+                    module.name, module.start_addr, module.size
+                );
+            }
+        }
+
+        let module = matching_modules.last().unwrap();
 
         let offset = offset as u64;
         let addr = module.start_addr.checked_add(offset).ok_or_else(|| {
